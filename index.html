@@ -364,17 +364,45 @@ out body;
       clearHighlight();
       const myId = ++lastRequestId;
 
-      let addresses = raw.split(',').map(s => s.trim()).filter(Boolean).slice(0, MAX_BUILDINGS);
-      addresses = addresses.map(a => {
-        const lower = a.toLowerCase();
-        if (!lower.includes('łódź') && !lower.includes('lodz') && !a.includes(',')) return 'Łódź, ' + a;
-        return a;
-      });
+            // Rozbij wpis, np. "Lodowa 54, 56, 60"
+      const segments = raw.split(',').map(s => s.trim()).filter(Boolean);
+
+      const addresses = [];
+      let lastStreet = null;
+      const lettersRegex = /[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]/;
+      const streetRegex = /^(.+?)\s+\d/;   // wszystko przed pierwszym numerem traktujemy jako nazwę ulicy
+
+      for (const seg of segments) {
+        const part = seg;
+
+        if (lettersRegex.test(part) && /\d/.test(part)) {
+          // Pełny adres z ulicą i numerem – zapamiętujemy ulicę
+          const m = part.match(streetRegex);
+          if (m) lastStreet = m[1].trim();
+          addresses.push(part);
+        } else if (lastStreet && /\d/.test(part) && !lettersRegex.test(part)) {
+          // Sam numer (np. "56") – dokładamy ostatnią ulicę ("Lodowa 56")
+          addresses.push(`${lastStreet} ${part}`);
+        } else {
+          // Nie rozpoznano – zostawiamy jak jest
+          addresses.push(part);
+        }
+      }
+
+      // Dodaj "Łódź," jeśli nie ma miasta
+      const finalAddresses = addresses
+        .slice(0, MAX_BUILDINGS)
+        .map(a => {
+          const lower = a.toLowerCase();
+          if (!lower.includes('łódź') && !lower.includes('lodz')) return 'Łódź, ' + a;
+          return a;
+        });
 
       const allPoints = [];
       let foundCount = 0;
 
-      for (const addr of addresses) {
+      // Dalej używamy finalAddresses zamiast addresses
+      for (const addr of finalAddresses) {
         try {
           const geo = await geocode(addr);
           if (!geo) { continue; }
