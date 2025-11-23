@@ -475,10 +475,10 @@ out body;
           let finalPicked = [];
 
           if (matches.length) {
-            // SPECJALNY przypadek: Bartoka 1 – wybierz największy budynek
-            if (wanted.street === 'bartoka' && wanted.number === '1' && rings.length) {
-              let largest = rings[0];
-              for (const r of rings) {
+            // SPECJALNY przypadek: Bartoka 1 – wybierz największy z DOPASOWANYCH
+            if (wanted.street === 'bartoka' && wanted.number === '1') {
+              let largest = matches[0];
+              for (const r of matches) {
                 if (r.area > largest.area) largest = r;
               }
               finalPicked = [largest.coords];
