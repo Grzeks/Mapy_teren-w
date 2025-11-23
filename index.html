@@ -399,30 +399,45 @@ out body;
           const nomiObj = geo[2];
           if (myId !== lastRequestId) return;
 
-          // pref: polygon z Nominatim (dokładne dopasowanie)
+          // pref: polygon z Nominatim TYLKO jeśli to faktycznie budynek,
+          // a nie np. fryzjer, sklep itp.
           let usedFromNominatim = false;
           if (nomiObj && nomiObj.geojson) {
-            const g = nomiObj.geojson;
-            if (g.type === 'Polygon') {
-              const ring = g.coordinates[0].map(([lon, lat]) => [lat, lon]);
-              buildingRings.push(ring);
-              allPoints.push(...ring);
-              foundCount++;
-              usedFromNominatim = true;
-            } else if (g.type === 'MultiPolygon') {
-              for (const poly of g.coordinates) {
-                const ring = poly[0].map(([lon, lat]) => [lat, lon]);
+            const cls = nomiObj.class || '';
+            const typ = nomiObj.type  || '';
+          
+            // akceptujemy tylko to, co wygląda na budynek mieszkalny / dom
+            const buildingLike =
+              cls === 'building' ||
+              typ === 'house' ||
+              typ === 'residential' ||
+              typ === 'apartments';
+          
+            if (buildingLike) {
+              const g = nomiObj.geojson;
+              if (g.type === 'Polygon') {
+                const ring = g.coordinates[0].map(([lon, lat]) => [lat, lon]);
                 buildingRings.push(ring);
                 allPoints.push(...ring);
                 foundCount++;
+                usedFromNominatim = true;
+              } else if (g.type === 'MultiPolygon') {
+                for (const poly of g.coordinates) {
+                  const ring = poly[0].map(([lon, lat]) => [lat, lon]);
+                  buildingRings.push(ring);
+                  allPoints.push(...ring);
+                  foundCount++;
+                }
+                usedFromNominatim = true;
               }
-              usedFromNominatim = true;
             }
+          
             if (usedFromNominatim) {
               if (myId !== lastRequestId) return;
-              continue;
+              continue; // mamy sensowny polygon budynku, nie trzeba Overpass
             }
           }
+
 
           // brak polygonu w Nominatim -> Overpass + filtrowanie
           const elems = await fetchBuildingWays(center[0], center[1], 60);
