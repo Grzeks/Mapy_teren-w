@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <title>Podświetlone budynki – final (precyzyjne dopasowanie)</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+  <style>
+    body { font-family: system-ui, sans-serif; margin:0; padding:0; }
+    header { padding:10px; background:#222; color:#f5f5f5; }
+    #controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    #adres { min-width:320px; padding:4px 8px; }
+    #filename { min-width:220px; padding:4px 8px; }
+    #status { margin-top:6px; font-size:0.9em; color:#d0ffd0; }
+    #map-container { position:relative; height:calc(100vh - 120px); width:100%; overflow:hidden; }
+    #map { height:100%; width:100%; }
+
+    /* Domyślne style ramki */
+    #crop-frame {
+      position: absolute;
+      display: none;
+      pointer-events: none;
+      border: 3px solid orange;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.25);
+      background: transparent;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 100000;
+    }
+
+    #highlight-svg {
+      position:absolute; left:0; top:0; width:100%; height:100%;
+      pointer-events:none; z-index:900;
+    }
+
+    button { padding:6px 10px; cursor:pointer; }
+    input[type="color"] { width:36px; height:28px; padding:0; border:0; background:transparent; cursor:pointer; }
+    label.inline { display:inline-flex; align-items:center; gap:6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div id="controls">
+      <span>Adresy (max 6, oddzielone przecinkami):</span>
+      <input id="adres" type="text" value="Lodowa 54, Lodowa 56" />
+      <label class="inline">Kolor: <input id="color-picker" type="color" value="#e96aec" /></label>
+      <label class="inline">Nazwa pliku: <input id="filename" type="text" value="blok_10x15cm_300dpi" /></label>
+      <label class="inline"><input id="allow-fallback" type="checkbox" /> Pozwól fallback (najbliższy)</label>
+      <button id="btn-show">Pokaż budynki</button>
+      <button id="btn-frame">Pokaż ramkę 10x15 cm</button>
+      <button id="btn-save">Zapisz PNG (300 DPI)</button>
+    </div>
+    <div id="status"></div>
+  </header>
+
+  <div id="map-container">
+    <div id="map"></div>
+    <svg id="highlight-svg" aria-hidden="true"></svg>
+    <div id="crop-frame"></div>
+  </div>
+
+  <script>
+    // --- Inicjalizacja mapy ---
+    const map = L.map('map').setView([51.759, 19.456], 16);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 20,
+      attribution: '© OpenStreetMap',
+      crossOrigin: true
+    }).addTo(map);
+
+    // DOM
+    const adresInput = document.getElementById('adres');
+    const btnShow = document.getElementById('btn-show');
+    const btnFrame = document.getElementById('btn-frame');
+    const btnSave = document.getElementById('btn-save');
+    const colorPicker = document.getElementById('color-picker');
+    const filenameInput = document.getElementById('filename');
+    const allowFallbackCheckbox = document.getElementById('allow-fallback');
+    const statusEl = document.getElementById('status');
+    const mapContainer = document.getElementById('map-container');
+    const cropFrame = document.getElementById('crop-frame');
+    const highlightSvg = document.getElementById('highlight-svg');
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.style.color = isError ? '#ff8080' : '#d0ffd0';
+    }
+
+    // --- Wymiary 10x15 cm @300dpi ---
+    const DPI = 300;
+    const CM_TO_INCH = 1/2.54;
+    const TARGET_WIDTH_CM = 15;
+    const TARGET_HEIGHT_CM = 10;
+    const TARGET_WIDTH_PX = Math.round(TARGET_WIDTH_CM * CM_TO_INCH * DPI);
+    const TARGET_HEIGHT_PX = Math.round(TARGET_HEIGHT_CM * CM_TO_INCH * DPI);
+    const ratioWidth = TARGET_WIDTH_CM;
+    const ratioHeight = TARGET_HEIGHT_CM;
+
+    // --- Ramka: forced setProperty + detach fallback (bez logów) ---
+    let frameVisible = false;
+    let cropFrameIsDetached = false;
+    let cropFramePrevStyles = null;
+
+    function computeFrameRectForContainer(containerRect) {
+      const vw = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+      const vh = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+      const targetRatio = ratioWidth / ratioHeight;
+      const margin = 0.85;
+      const w = containerRect.width;
+      const h = containerRect.height;
+      let frameW, frameH;
+      if (w && h) {
+        if (w / h > targetRatio) {
+          frameH = h * margin;
+          frameW = frameH * targetRatio;
+        } else {
+          frameW = w * margin;
+          frameH = frameW / targetRatio;
+        }
+      } else {
+        if (vw / vh > targetRatio) {
+          frameH = vh * margin;
+          frameW = frameH * targetRatio;
+        } else {
+          frameW = vw * margin;
+          frameH = frameW / targetRatio;
+        }
+      }
+      const left = containerRect.left + (containerRect.width - frameW) / 2;
+      const top  = containerRect.top  + (containerRect.height - frameH) / 2;
+      return { frameW, frameH, left, top };
+    }
+
+    function detachCropFrameToBody() {
+      if (cropFrameIsDetached) return;
+      cropFramePrevStyles = {
+        position: cropFrame.style.position || '',
+        left: cropFrame.style.left || '',
+        top: cropFrame.style.top || '',
+        transform: cropFrame.style.transform || '',
+        width: cropFrame.style.width || '',
+        height: cropFrame.style.height || '',
+        zIndex: cropFrame.style.zIndex || '',
+        display: cropFrame.style.display || ''
+      };
+      document.body.appendChild(cropFrame);
+      cropFrameIsDetached = true;
+    }
+
+    function reattachCropFrameToContainer() {
+      if (!cropFrameIsDetached) return;
+      mapContainer.appendChild(cropFrame);
+      if (cropFramePrevStyles) {
+        cropFrame.style.position = cropFramePrevStyles.position;
+        cropFrame.style.left = cropFramePrevStyles.left;
+        cropFrame.style.top = cropFramePrevStyles.top;
+        cropFrame.style.transform = cropFramePrevStyles.transform;
+        cropFrame.style.width = cropFramePrevStyles.width;
+        cropFrame.style.height = cropFramePrevStyles.height;
+        cropFrame.style.zIndex = cropFramePrevStyles.zIndex;
+        cropFrame.style.display = cropFramePrevStyles.display;
+      }
+      cropFrameIsDetached = false;
+      cropFramePrevStyles = null;
+    }
+
+    function forceShowAndPositionFrame() {
+      cropFrame.style.setProperty('display','block','important');
+      cropFrame.style.setProperty('visibility','visible','important');
+      cropFrame.style.setProperty('opacity','1','important');
+      cropFrame.style.setProperty('z-index','2147483647','important');
+      cropFrame.style.setProperty('border','4px solid orange','important');
+      cropFrame.style.setProperty('box-shadow','0 0 0 9999px rgba(0,0,0,0.25)','important');
+
+      const cont = mapContainer.getBoundingClientRect();
+      const ratio = 15/10, margin = 0.85;
+      let fw, fh;
+      if (cont.width && cont.height) {
+        if (cont.width/cont.height > ratio) { fh = cont.height*margin; fw = fh*ratio; }
+        else { fw = cont.width*margin; fh = fw/ratio; }
+      } else {
+        const vw = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+        const vh = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+        if (vw/vh > ratio) { fh = vh*margin; fw = fh*ratio; } else { fw = vw*margin; fh = fw/ratio; }
+      }
+
+      detachCropFrameToBody();
+      cropFrame.style.setProperty('position','fixed','important');
+      cropFrame.style.setProperty('left', Math.round(cont.left + (cont.width-fw)/2) + 'px','important');
+      cropFrame.style.setProperty('top',  Math.round(cont.top  + (cont.height-fh)/2) + 'px','important');
+      cropFrame.style.setProperty('width', Math.round(fw) + 'px','important');
+      cropFrame.style.setProperty('height', Math.round(fh) + 'px','important');
+      cropFrame.style.setProperty('transform','none','important');
+    }
+
+    function updateCropFrame() {
+      if (!frameVisible) return { ok: false };
+      const contRect = mapContainer.getBoundingClientRect();
+      const r = computeFrameRectForContainer(contRect);
+      if (!r || !isFinite(r.frameW) || !isFinite(r.frameH)) return { ok: false };
+
+      cropFrame.style.setProperty('display','block','important');
+      cropFrame.style.setProperty('visibility','visible','important');
+      cropFrame.style.setProperty('opacity','1','important');
+      cropFrame.style.setProperty('z-index','2147483647','important');
+      cropFrame.style.setProperty('border','3px solid orange','important');
+      cropFrame.style.setProperty('box-shadow','0 0 0 9999px rgba(0,0,0,0.25)','important');
+
+      detachCropFrameToBody();
+      cropFrame.style.setProperty('position','fixed','important');
+      cropFrame.style.setProperty('left', Math.round(r.left) + 'px','important');
+      cropFrame.style.setProperty('top', Math.round(r.top) + 'px','important');
+      cropFrame.style.setProperty('width', Math.round(r.frameW) + 'px','important');
+      cropFrame.style.setProperty('height', Math.round(r.frameH) + 'px','important');
+      cropFrame.style.setProperty('transform','none','important');
+
+      return { ok: true, rect: r };
+    }
+
+    function ensureCropVisible() {
+      const rect = cropFrame.getBoundingClientRect();
+      const cs = window.getComputedStyle(cropFrame);
+      if (cs.display === 'none' || rect.width === 0 || rect.height === 0) {
+        cropFrame.style.setProperty('position','fixed','important');
+        cropFrame.style.setProperty('left','50%','important');
+        cropFrame.style.setProperty('top','50%','important');
+        cropFrame.style.setProperty('transform','translate(-50%,-50%)','important');
+        const vw = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
+        const vh = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+        const margin = 0.85; const ratio = 15/10;
+        let fw, fh;
+        if (vw/vh > ratio) { fh = vh*margin; fw = fh*ratio; } else { fw = vw*margin; fh = fw/ratio; }
+        cropFrame.style.setProperty('width', Math.round(fw)+'px','important');
+        cropFrame.style.setProperty('height', Math.round(fh)+'px','important');
+        cropFrame.style.setProperty('z-index','2147483647','important');
+      }
+    }
+
+    function showFrame() {
+      frameVisible = true;
+      cropFrame.style.setProperty('display','block','important');
+      cropFrame.style.setProperty('visibility','visible','important');
+      cropFrame.style.setProperty('opacity','1','important');
+      requestAnimationFrame(() => {
+        updateCropFrame();
+        ensureCropVisible();
+      });
+      btnFrame.textContent = 'Ukryj ramkę 10x15 cm';
+    }
+
+    function hideFrame() {
+      frameVisible = false;
+      reattachCropFrameToContainer();
+      cropFrame.style.setProperty('display','none','important');
+      btnFrame.textContent = 'Pokaż ramkę 10x15 cm';
+    }
+
+    btnFrame.addEventListener('click', () => { if (frameVisible) hideFrame(); else showFrame(); });
+    map.on('move zoom', () => { if (frameVisible) updateCropFrame(); });
+    window.addEventListener('resize', () => { if (frameVisible) updateCropFrame(); });
+
+    // --- SVG highlight (multi) ---
+    const MAX_BUILDINGS = 6;
+    let buildingRings = [];
+
+    function clearHighlight() {
+      buildingRings = [];
+      while (highlightSvg.firstChild) highlightSvg.removeChild(highlightSvg.firstChild);
+    }
+    function hexToRgba(hex, alpha = 0.35) {
+      const c = hex.replace('#','');
+      const bigint = parseInt(c, 16);
+      const r = (bigint >> 16) & 255;
+      const g = (bigint >> 8) & 255;
+      const b = bigint & 255;
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+    function updateHighlightSvg() {
+      while (highlightSvg.firstChild) highlightSvg.removeChild(highlightSvg.firstChild);
+      if (!buildingRings.length) return;
+      const color = colorPicker.value || '#b36b00'; // default tutaj
+      const fill = hexToRgba(color, 0.35);
+      const stroke = color;
+      for (const ring of buildingRings) {
+        if (!ring || ring.length < 3) continue;
+        const pts = ring.map(([la, lo]) => {
+          const p = map.latLngToContainerPoint([la, lo]);
+          return `${p.x},${p.y}`;
+        }).join(' ');
+        const poly = document.createElementNS("http://www.w3.org/2000/svg","polygon");
+        poly.setAttribute('points', pts);
+        poly.setAttribute('fill', fill);
+        poly.setAttribute('stroke', stroke);
+        poly.setAttribute('stroke-width', '3');
+        highlightSvg.appendChild(poly);
+      }
+    }
+    map.on('move zoom', updateHighlightSvg);
+
+    // --- Geocoding + Overpass + precyzyjne filtrowanie ---
+    async function geocode(address) {
+      const url = 'https://nominatim.openstreetmap.org/search?' +
+        new URLSearchParams({ format:'json', limit:'1', q: address, polygon_geojson: 1 });
+      const resp = await fetch(url, { headers: { 'Accept-Language': 'pl' } });
+      if (!resp.ok) throw new Error('Błąd geokodowania');
+      const data = await resp.json();
+      if (!data.length) return null;
+      return [parseFloat(data[0].lat), parseFloat(data[0].lon), data[0]];
+    }
+
+    async function fetchBuildingWays(lat, lon, radius = 60) {
+      const query = `
+[out:json][timeout:25];
+(
+  way["building"](around:${radius},${lat},${lon});
+  relation["building"](around:${radius},${lat},${lon});
+);
+(._;>;);
+out body;
+`;
+      const resp = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
+      if (!resp.ok) throw new Error('Błąd Overpass');
+      const data = await resp.json();
+      return data.elements || [];
+    }
+
+    function normalize(s='') {
+      return String(s).trim().toLowerCase()
+        .replace(/\./g,'')
+        .replace(/\b(ulica|ul|al|aleja|al\.)\b/g,'')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+        .replace(/\s+/g,' ').trim();
+    }
+    function pointInRing(lon, lat, ring) {
+      let inside = false;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const xi = ring[i][1], yi = ring[i][0];
+        const xj = ring[j][1], yj = ring[j][0];
+        const intersect = ((yi > lat) !== (yj > lat)) &&
+          (lon < (xj - xi) * (lat - yi) / (yj - yi + 0.0) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
+    let lastRequestId = 0;
+    async function showBuildingsForAddresses() {
+      const raw = adresInput.value.trim();
+      if (!raw) { setStatus('Podaj adresy.', true); return; }
+
+      setStatus('Szukam…');
+      clearHighlight();
+      const myId = ++lastRequestId;
+
+      let addresses = raw.split(',').map(s => s.trim()).filter(Boolean).slice(0, MAX_BUILDINGS);
+      addresses = addresses.map(a => {
+        const lower = a.toLowerCase();
+        if (!lower.includes('łódź') && !lower.includes('lodz') && !a.includes(',')) return 'Łódź, ' + a;
+        return a;
+      });
+
+      const allPoints = [];
+      let foundCount = 0;
+
+      for (const addr of addresses) {
+        try {
+          const geo = await geocode(addr);
+          if (!geo) { continue; }
+          const center = [geo[0], geo[1]];
+          const nomiObj = geo[2];
+          if (myId !== lastRequestId) return;
+
+          // pref: polygon z Nominatim (dokładne dopasowanie)
+          let usedFromNominatim = false;
+          if (nomiObj && nomiObj.geojson) {
+            const g = nomiObj.geojson;
+            if (g.type === 'Polygon') {
+              const ring = g.coordinates[0].map(([lon, lat]) => [lat, lon]);
+              buildingRings.push(ring);
+              allPoints.push(...ring);
+              foundCount++;
+              usedFromNominatim = true;
+            } else if (g.type === 'MultiPolygon') {
+              for (const poly of g.coordinates) {
+                const ring = poly[0].map(([lon, lat]) => [lat, lon]);
+                buildingRings.push(ring);
+                allPoints.push(...ring);
+                foundCount++;
+              }
+              usedFromNominatim = true;
+            }
+            if (usedFromNominatim) {
+              if (myId !== lastRequestId) return;
+              continue;
+            }
+          }
+
+          // brak polygonu w Nominatim -> Overpass + filtrowanie
+          const elems = await fetchBuildingWays(center[0], center[1], 60);
+          if (myId !== lastRequestId) return;
+          if (!elems.length) { continue; }
+
+          const nodeMap = new Map();
+          for (const el of elems) if (el.type === 'node') nodeMap.set(el.id, [el.lat, el.lon]);
+
+          const rings = [];
+          const ways = elems.filter(el => el.type === 'way');
+          for (const w of ways) {
+            const coords = w.nodes.map(id => nodeMap.get(id)).filter(Boolean);
+            if (coords.length >= 3) rings.push({ coords, tags: w.tags || {} });
+          }
+
+          const relations = elems.filter(el => el.type === 'relation' && el.tags && (el.tags.type === 'multipolygon' || el.tags.building));
+          for (const rel of relations) {
+            if (!rel.members) continue;
+            const outerMembers = rel.members.filter(m => m.type === 'way' && (m.role === 'outer' || m.role === ''));
+            for (const m of outerMembers) {
+              const way = elems.find(e => e.type === 'way' && e.id === m.ref);
+              if (!way) continue;
+              const coords = way.nodes.map(id => nodeMap.get(id)).filter(Boolean);
+              if (coords.length >= 3) rings.push({ coords, tags: way.tags || {} });
+            }
+          }
+
+          if (rings.length === 0) { continue; }
+
+          // parsowanie adresu: ulicę i numer (heurystyka)
+          const m = addr.match(/(.*)\s+(\d+[a-zA-Z0-9\-\/]*)$/);
+          const wanted = {};
+          if (m) { wanted.street = normalize(m[1]); wanted.number = normalize(m[2]); }
+
+          // filtrujemy wyłącznie: addr:* match OR point-in-polygon
+          const matches = [];
+          for (const r of rings) {
+            const tags = r.tags || {};
+            let accept = false;
+            if (tags['addr:housenumber'] || tags['addr:street']) {
+              const tagNum = normalize(tags['addr:housenumber'] || '');
+              const tagStreet = normalize(tags['addr:street'] || tags['addr:street:name'] || '');
+              if (wanted.number && wanted.street && tagNum === wanted.number && tagStreet === wanted.street) accept = true;
+            }
+            if (!accept) {
+              if (pointInRing(center[1], center[0], r.coords)) accept = true;
+            }
+            if (accept) matches.push(r.coords);
+          }
+
+          // jeżeli nic nie pasuje i użytkownik zezwolił na fallback, wybierz najbliższy
+          let finalPicked = [];
+          if (matches.length) finalPicked = matches;
+          else if (allowFallbackCheckbox.checked) {
+            const wayInfos = rings.map(rr => {
+              const coords = rr.coords;
+              let sumLat=0,sumLon=0;
+              for (const [la,lo] of coords){ sumLat+=la; sumLon+=lo; }
+              const cLat = sumLat/coords.length, cLon = sumLon/coords.length;
+              const dLat = cLat - center[0], dLon = cLon - center[1];
+              return { coords, dist2: dLat*dLat + dLon*dLon };
+            }).sort((a,b)=>a.dist2-b.dist2);
+            if (wayInfos.length) finalPicked.push(wayInfos[0].coords);
+          }
+
+          for (const p of finalPicked) {
+            if (buildingRings.length >= MAX_BUILDINGS) break;
+            buildingRings.push(p);
+            allPoints.push(...p);
+            foundCount++;
+          }
+
+        } catch (err) {
+          // cicho obsługujemy błędy (bez logów)
+        }
+      }
+
+      if (buildingRings.length) {
+        updateHighlightSvg();
+        const tmpPoly = L.polygon([].concat(...buildingRings));
+        map.fitBounds(tmpPoly.getBounds().pad(0.6));
+        setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
+      } else {
+        setStatus('Nie znaleziono precyzyjnych dopasowań dla podanych adresów.', true);
+      }
+    }
+
+    btnShow.addEventListener('click', async () => {
+      clearHighlight();
+      await showBuildingsForAddresses();
+    });
+    adresInput.addEventListener('keydown', e => { if (e.key === 'Enter') { clearHighlight(); showBuildingsForAddresses(); } });
+
+    // --- Eksport PNG 10x15 cm @300 DPI (używa nazwy z pola) ---
+    const HTML2CANVAS_SCALE = 3;
+    async function saveFramePng() {
+      if (!frameVisible) { setStatus('Najpierw włącz ramkę kopiowania.', true); return; }
+      try {
+        setStatus('Generuję obraz wysokiej rozdzielczości…');
+        const fullCanvas = await html2canvas(mapContainer, { useCORS: true, logging: false, scale: HTML2CANVAS_SCALE });
+
+        const frameRect = cropFrame.getBoundingClientRect();
+        const contRect = mapContainer.getBoundingClientRect();
+
+        const sx = frameRect.left - contRect.left;
+        const sy = frameRect.top  - contRect.top;
+        const sw = frameRect.width;
+        const sh = frameRect.height;
+
+        const scaleX = fullCanvas.width  / mapContainer.clientWidth;
+        const scaleY = fullCanvas.height / mapContainer.clientHeight;
+
+        const sxScaled = sx * scaleX;
+        const syScaled = sy * scaleY;
+        const swScaled = sw * scaleX;
+        const shScaled = sh * scaleY;
+
+        const outCanvas = document.createElement('canvas');
+        outCanvas.width = TARGET_WIDTH_PX;
+        outCanvas.height = TARGET_HEIGHT_PX;
+        const ctx = outCanvas.getContext('2d');
+
+        ctx.drawImage(fullCanvas, sxScaled, syScaled, swScaled, shScaled, 0, 0, TARGET_WIDTH_PX, TARGET_HEIGHT_PX);
+
+        const dataUrl = outCanvas.toDataURL('image/png');
+        const a = document.createElement('a');
+        a.href = dataUrl;
+
+        // Użyj nazwy z pola (dodaj .png jeśli brak)
+        let baseName = (filenameInput.value || 'map_10x15cm_300dpi').trim();
+        if (!baseName.toLowerCase().endsWith('.png')) baseName += '.png';
+        a.download = baseName;
+
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        setStatus('Zapisano PNG.');
+      } catch (err) {
+        setStatus('Błąd tworzenia PNG. Użyj ręcznego zrzutu jako fallback.', true);
+      }
+    }
+    btnSave.addEventListener('click', saveFramePng);
+
+    colorPicker.addEventListener('input', updateHighlightSvg);
+
+    // -- gdzie zmienić domyślny kolor zaznaczenia bloków --
+    // Domyślny kolor znajduje się w wartości input[type="color"] powyżej:
+    // <input id="color-picker" type="color" value="#b36b00" />
+    // Zmień wartość value="#b36b00" na dowolny hex, np. "#0066cc" i zapis pliku.
+  </script>
+</body>
+</html>
