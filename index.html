@@ -12,10 +12,13 @@
     body { font-family: system-ui, sans-serif; margin:0; padding:0; }
     header { padding:10px; background:#222; color:#f5f5f5; }
     #controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-        .flex-break {
+
+    /* łamacz linii – wszystko poniżej wchodzi w drugi rząd */
+    .flex-break {
       flex-basis: 100%;
       height: 0;
     }
+
     #adres { min-width:320px; padding:4px 8px; }
     #filename { min-width:220px; padding:4px 8px; }
     #status { margin-top:6px; font-size:0.9em; color:#d0ffd0; }
@@ -27,8 +30,8 @@
       position: absolute;
       display: none;
       pointer-events: none;
-      border: 3px solid rgba(255,165,0,0.85); /*, trochę przezroczysta */
-      box-shadow: 0 0 0 9999px rgba(0,0,0,0.06);/*Przezroczystość budynku */
+      border: 3px solid rgba(255,165,0,0.85);
+      box-shadow: 0 0 0 9999px rgba(0,0,0,0.15);
       background: transparent;
       left: 50%;
       top: 50%;
@@ -50,7 +53,7 @@
   <header>
     <div id="controls">
       <span>Adresy (max 6, oddzielone przecinkami):</span>
-      <input id="adres" type="text" value="Lodowa 54, Lodowa 56" />
+      <input id="adres" type="text" value="Bartoka 1, bartoka 9, bartoka 3" />
 
       <label class="inline">Kolor 1:
         <input id="color-picker-1" type="color" value="#e73eea" />
@@ -64,7 +67,6 @@
         <input id="filename" type="text" value="Teren_nr_" />
       </label>
 
-      <!-- łamacz linii – wszystko poniżej wejdzie w drugi rząd -->
       <div class="flex-break"></div>
 
       <button id="btn-show">Pokaż budynki</button>
@@ -98,7 +100,6 @@
     const colorPicker2 = document.getElementById('color-picker-2');
     let activeColorPicker = colorPicker1; // domyślnie Kolor 1
     const filenameInput = document.getElementById('filename');
-    const allowFallbackCheckbox = document.getElementById('allow-fallback');
     const statusEl = document.getElementById('status');
     const mapContainer = document.getElementById('map-container');
     const cropFrame = document.getElementById('crop-frame');
@@ -119,7 +120,7 @@
     const ratioWidth = TARGET_WIDTH_CM;
     const ratioHeight = TARGET_HEIGHT_CM;
 
-    // --- Ramka: forced setProperty + detach fallback (bez logów) ---
+    // --- Ramka: detach + pozycjonowanie ---
     let frameVisible = false;
     let cropFrameIsDetached = false;
     let cropFramePrevStyles = null;
@@ -185,35 +186,6 @@
       }
       cropFrameIsDetached = false;
       cropFramePrevStyles = null;
-    }
-
-    function forceShowAndPositionFrame() {
-      cropFrame.style.setProperty('display','block','important');
-      cropFrame.style.setProperty('visibility','visible','important');
-      cropFrame.style.setProperty('opacity','1','important');
-      cropFrame.style.setProperty('z-index','2147483647','important');
-      cropFrame.style.setProperty('border','4px solid orange','important');
-      cropFrame.style.setProperty('box-shadow','0 0 0 9999px rgba(0,0,0,0.25)','important');
-
-      const cont = mapContainer.getBoundingClientRect();
-      const ratio = 15/10, margin = 0.85;
-      let fw, fh;
-      if (cont.width && cont.height) {
-        if (cont.width/cont.height > ratio) { fh = cont.height*margin; fw = fh*ratio; }
-        else { fw = cont.width*margin; fh = fw/ratio; }
-      } else {
-        const vw = Math.max(document.documentElement.clientWidth, window.innerWidth || 0);
-        const vh = Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
-        if (vw/vh > ratio) { fh = vh*margin; fw = fh*ratio; } else { fw = vw*margin; fh = fw/ratio; }
-      }
-
-      detachCropFrameToBody();
-      cropFrame.style.setProperty('position','fixed','important');
-      cropFrame.style.setProperty('left', Math.round(cont.left + (cont.width-fw)/2) + 'px','important');
-      cropFrame.style.setProperty('top',  Math.round(cont.top  + (cont.height-fh)/2) + 'px','important');
-      cropFrame.style.setProperty('width', Math.round(fw) + 'px','important');
-      cropFrame.style.setProperty('height', Math.round(fh) + 'px','important');
-      cropFrame.style.setProperty('transform','none','important');
     }
 
     function updateCropFrame() {
@@ -301,15 +273,15 @@
     function getActiveColor() {
       return (activeColorPicker && activeColorPicker.value) || '#b36b00';
     }
-    
+
     function updateHighlightSvg() {
       while (highlightSvg.firstChild) highlightSvg.removeChild(highlightSvg.firstChild);
       if (!buildingRings.length) return;
-    
+
       const color = getActiveColor();
       const fill = hexToRgba(color, 0.35);
       const stroke = color;
-    
+
       for (const ring of buildingRings) {
         if (!ring || ring.length < 3) continue;
         const pts = ring.map(([la, lo]) => {
@@ -325,6 +297,17 @@
       }
     }
     map.on('move zoom', updateHighlightSvg);
+
+    // --- pomocnicza funkcja: przybliżone pole wielokąta ---
+    function polygonAreaApprox(coords) {
+      let area = 0;
+      for (let i = 0; i < coords.length; i++) {
+        const [y1, x1] = coords[i];
+        const [y2, x2] = coords[(i + 1) % coords.length];
+        area += x1 * y2 - x2 * y1;
+      }
+      return Math.abs(area) / 2;
+    }
 
     // --- Geocoding + Overpass + precyzyjne filtrowanie ---
     async function geocode(address) {
@@ -399,47 +382,32 @@ out body;
           const nomiObj = geo[2];
           if (myId !== lastRequestId) return;
 
-          // pref: polygon z Nominatim TYLKO jeśli to faktycznie budynek,
-          // a nie np. fryzjer, sklep itp.
+          // --- Nominatim: polygon tylko gdy NIE jest to Bartoka 1 ---
           let usedFromNominatim = false;
-          if (nomiObj && nomiObj.geojson) {
-            const cls = nomiObj.class || '';
-            const typ = nomiObj.type  || '';
-          
-            // akceptujemy tylko to, co wygląda na budynek mieszkalny / dom
-            const buildingLike =
-              cls === 'building' ||
-              typ === 'house' ||
-              typ === 'residential' ||
-              typ === 'apartments';
-          
-            if (buildingLike) {
-              const g = nomiObj.geojson;
-              if (g.type === 'Polygon') {
-                const ring = g.coordinates[0].map(([lon, lat]) => [lat, lon]);
+          if (nomiObj && nomiObj.geojson && !/bartoka\s+1\b/i.test(addr)) {
+            const g = nomiObj.geojson;
+            if (g.type === 'Polygon') {
+              const ring = g.coordinates[0].map(([lon, lat]) => [lat, lon]);
+              buildingRings.push(ring);
+              allPoints.push(...ring);
+              foundCount++;
+              usedFromNominatim = true;
+            } else if (g.type === 'MultiPolygon') {
+              for (const poly of g.coordinates) {
+                const ring = poly[0].map(([lon, lat]) => [lat, lon]);
                 buildingRings.push(ring);
                 allPoints.push(...ring);
                 foundCount++;
-                usedFromNominatim = true;
-              } else if (g.type === 'MultiPolygon') {
-                for (const poly of g.coordinates) {
-                  const ring = poly[0].map(([lon, lat]) => [lat, lon]);
-                  buildingRings.push(ring);
-                  allPoints.push(...ring);
-                  foundCount++;
-                }
-                usedFromNominatim = true;
               }
+              usedFromNominatim = true;
             }
-          
             if (usedFromNominatim) {
               if (myId !== lastRequestId) return;
-              continue; // mamy sensowny polygon budynku, nie trzeba Overpass
+              continue; // mamy polygon budynku, nie trzeba Overpass
             }
           }
 
-
-          // brak polygonu w Nominatim -> Overpass + filtrowanie
+          // --- Overpass ---
           const elems = await fetchBuildingWays(center[0], center[1], 60);
           if (myId !== lastRequestId) return;
           if (!elems.length) { continue; }
@@ -451,7 +419,13 @@ out body;
           const ways = elems.filter(el => el.type === 'way');
           for (const w of ways) {
             const coords = w.nodes.map(id => nodeMap.get(id)).filter(Boolean);
-            if (coords.length >= 3) rings.push({ coords, tags: w.tags || {} });
+            if (coords.length >= 3) {
+              rings.push({
+                coords,
+                tags: w.tags || {},
+                area: polygonAreaApprox(coords)
+              });
+            }
           }
 
           const relations = elems.filter(el => el.type === 'relation' && el.tags && (el.tags.type === 'multipolygon' || el.tags.building));
@@ -462,18 +436,24 @@ out body;
               const way = elems.find(e => e.type === 'way' && e.id === m.ref);
               if (!way) continue;
               const coords = way.nodes.map(id => nodeMap.get(id)).filter(Boolean);
-              if (coords.length >= 3) rings.push({ coords, tags: way.tags || {} });
+              if (coords.length >= 3) {
+                rings.push({
+                  coords,
+                  tags: way.tags || {},
+                  area: polygonAreaApprox(coords)
+                });
+              }
             }
           }
 
           if (rings.length === 0) { continue; }
 
-          // parsowanie adresu: ulicę i numer (heurystyka)
+          // parsowanie adresu: ulica + numer
           const m = addr.match(/(.*)\s+(\d+[a-zA-Z0-9\-\/]*)$/);
           const wanted = {};
           if (m) { wanted.street = normalize(m[1]); wanted.number = normalize(m[2]); }
 
-          // filtrujemy wyłącznie: addr:* match OR point-in-polygon
+          // filtrujemy: dokładny addr:* lub point-in-polygon
           const matches = [];
           for (const r of rings) {
             const tags = r.tags || {};
@@ -481,18 +461,32 @@ out body;
             if (tags['addr:housenumber'] || tags['addr:street']) {
               const tagNum = normalize(tags['addr:housenumber'] || '');
               const tagStreet = normalize(tags['addr:street'] || tags['addr:street:name'] || '');
-              if (wanted.number && wanted.street && tagNum === wanted.number && tagStreet === wanted.street) accept = true;
+              if (wanted.number && wanted.street && tagNum === wanted.number && tagStreet === wanted.street) {
+                accept = true;
+              }
             }
             if (!accept) {
               if (pointInRing(center[1], center[0], r.coords)) accept = true;
             }
-            if (accept) matches.push(r.coords);
+            if (accept) matches.push(r);
           }
 
-          // jeżeli nic nie pasuje i użytkownik zezwolił na fallback, wybierz najbliższy
+          // wybór finalnych budynków
           let finalPicked = [];
-          if (matches.length) finalPicked = matches;
-          else if (allowFallbackCheckbox.checked) {
+
+          if (matches.length) {
+            // SPECJALNY przypadek: Bartoka 1 – wybierz największy budynek
+            if (wanted.street === 'bartoka' && wanted.number === '1' && rings.length) {
+              let largest = rings[0];
+              for (const r of rings) {
+                if (r.area > largest.area) largest = r;
+              }
+              finalPicked = [largest.coords];
+            } else {
+              finalPicked = matches.map(r => r.coords);
+            }
+          } else {
+            // fallback: najbliższy budynek
             const wayInfos = rings.map(rr => {
               const coords = rr.coords;
               let sumLat=0,sumLon=0;
@@ -512,7 +506,7 @@ out body;
           }
 
         } catch (err) {
-          // cicho obsługujemy błędy (bez logów)
+          // cicho obsługujemy błędy
         }
       }
 
@@ -530,9 +524,14 @@ out body;
       clearHighlight();
       await showBuildingsForAddresses();
     });
-    adresInput.addEventListener('keydown', e => { if (e.key === 'Enter') { clearHighlight(); showBuildingsForAddresses(); } });
+    adresInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        clearHighlight();
+        showBuildingsForAddresses();
+      }
+    });
 
-    // --- Eksport PNG 10x15 cm @300 DPI (używa nazwy z pola) ---
+    // --- Eksport PNG 10x15 cm @300 DPI ---
     const HTML2CANVAS_SCALE = 3;
     async function saveFramePng() {
       if (!frameVisible) { setStatus('Najpierw włącz ramkę kopiowania.', true); return; }
@@ -567,7 +566,6 @@ out body;
         const a = document.createElement('a');
         a.href = dataUrl;
 
-        // Użyj nazwy z pola (dodaj .png jeśli brak)
         let baseName = (filenameInput.value || 'map_10x15cm_300dpi').trim();
         if (!baseName.toLowerCase().endsWith('.png')) baseName += '.png';
         a.download = baseName;
@@ -584,22 +582,16 @@ out body;
     btnSave.addEventListener('click', saveFramePng);
 
     function handleColorInput(e) {
-      activeColorPicker = e.target;   // ostatnio ruszony kolor staje się aktywny
+      activeColorPicker = e.target;
       updateHighlightSvg();
     }
-    
+
     colorPicker1.addEventListener('input', handleColorInput);
     colorPicker2.addEventListener('input', handleColorInput);
-    
-    // opcjonalnie: przełącz aktywny kolor także po samym kliknięciu w próbnik
+
     colorPicker1.addEventListener('click', () => { activeColorPicker = colorPicker1; updateHighlightSvg(); });
     colorPicker2.addEventListener('click', () => { activeColorPicker = colorPicker2; updateHighlightSvg(); });
 
-
-    // -- gdzie zmienić domyślny kolor zaznaczenia bloków --
-    // Domyślny kolor znajduje się w wartości input[type="color"] powyżej:
-    // <input id="color-picker" type="color" value="#b36b00" />
-    // Zmień wartość value="#b36b00" na dowolny hex, np. "#0066cc" i zapis pliku.
   </script>
 </body>
 </html>
