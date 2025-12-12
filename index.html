@@ -374,26 +374,45 @@ out body;
       const myId = ++lastRequestId;
 
       // Rozbij wpis, np. "Lodowa 54, 56, 60"
+      // Rozbij wpis, np. "Listopadowa 111, 113, 115A/2, Piotrkowska 10, 12"
       const segments = raw.split(',').map(s => s.trim()).filter(Boolean);
-
+      
       const addresses = [];
       let lastStreet = null;
-      const lettersRegex = /[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]/;
-      const streetRegex = /^(.+?)\s+\d/;
-
-      for (const seg of segments) {
-        const part = seg;
-
-        if (lettersRegex.test(part) && /\d/.test(part)) {
-          const m = part.match(streetRegex);
-          if (m) lastStreet = m[1].trim();
+      
+      // sam numer domu (np. 113, 113A, 113/1, 113-115)
+      const isHouseNumberOnly = (s) =>
+        /^\d+[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż0-9\-\/]*$/.test(s);
+      
+      // "Ulica 123" -> wyciągnij "Ulica"
+      const extractStreet = (s) => {
+        const m = s.match(/^(.+?)\s+\d/);
+        return m ? m[1].trim() : null;
+      };
+      
+      // czy wygląda na "ulica + numer"
+      const looksLikeStreetAndNumber = (s) =>
+        /[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]/.test(s) && /\d/.test(s) && !!extractStreet(s);
+      
+      for (const part of segments) {
+        // 1) pełny wpis "ulica + numer" -> zapamiętaj ulicę
+        if (looksLikeStreetAndNumber(part)) {
+          const st = extractStreet(part);
+          if (st) lastStreet = st;
           addresses.push(part);
-        } else if (lastStreet && /\d/.test(part) && !lettersRegex.test(part)) {
-          addresses.push(`${lastStreet} ${part}`);
-        } else {
-          addresses.push(part);
+          continue;
         }
+      
+        // 2) sam numer -> dopnij do ostatniej ulicy
+        if (lastStreet && isHouseNumberOnly(part)) {
+          addresses.push(`${lastStreet} ${part}`);
+          continue;
+        }
+      
+        // 3) cokolwiek innego -> zostaw jak jest (nie psuj lastStreet)
+        addresses.push(part);
       }
+
 
       const finalAddresses = addresses
         .slice(0, MAX_BUILDINGS)
