@@ -1,4 +1,4 @@
-zoomzoom<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pl">
 <head>
   <meta charset="utf-8" />
@@ -13,11 +13,7 @@ zoomzoom<!DOCTYPE html>
     header { padding:10px; background:#222; color:#f5f5f5; }
     #controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
-    /* łamacz linii – wszystko poniżej wchodzi w drugi rząd */
-    .flex-break {
-      flex-basis: 100%;
-      height: 0;
-    }
+    .flex-break { flex-basis: 100%; height: 0; }
 
     #adres { min-width:320px; padding:4px 8px; }
     #filename { min-width:220px; padding:4px 8px; }
@@ -25,7 +21,6 @@ zoomzoom<!DOCTYPE html>
     #map-container { position:relative; height:calc(100vh - 120px); width:100%; overflow:hidden; }
     #map { height:100%; width:100%; }
 
-    /* Domyślne style ramki */
     #crop-frame {
       position: absolute;
       display: none;
@@ -83,8 +78,19 @@ zoomzoom<!DOCTYPE html>
   </div>
 
   <script>
+    // =========================================================
+    //  STAŁY ZOOM – ustaw tutaj:
+    // =========================================================
+    const FIXED_ZOOM = 16;   // <- wpisz swój zoom (np. 17, 18, 19...)
+    const LOCK_ZOOM  = false; // <- true = użytkownik nie zmieni zoomu ręcznie
+    // =========================================================
+
     // --- Inicjalizacja mapy ---
-    const map = L.map('map').setView([51.759, 19.456], 16);
+    const map = L.map('map', {
+      minZoom: LOCK_ZOOM ? FIXED_ZOOM : 0,
+      maxZoom: LOCK_ZOOM ? FIXED_ZOOM : 20
+    }).setView([51.759, 19.456], FIXED_ZOOM);
+
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 20,
       attribution: '© OpenStreetMap',
@@ -262,6 +268,7 @@ zoomzoom<!DOCTYPE html>
       buildingRings = [];
       while (highlightSvg.firstChild) highlightSvg.removeChild(highlightSvg.firstChild);
     }
+
     function hexToRgba(hex, alpha = 0.35) {
       const c = hex.replace('#','');
       const bigint = parseInt(c, 16);
@@ -343,6 +350,7 @@ out body;
         .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
         .replace(/\s+/g,' ').trim();
     }
+
     function pointInRing(lon, lat, ring) {
       let inside = false;
       for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -356,6 +364,7 @@ out body;
     }
 
     let lastRequestId = 0;
+
     async function showBuildingsForAddresses() {
       const raw = adresInput.value.trim();
       if (!raw) { setStatus('Podaj adresy.', true); return; }
@@ -364,32 +373,28 @@ out body;
       clearHighlight();
       const myId = ++lastRequestId;
 
-            // Rozbij wpis, np. "Lodowa 54, 56, 60"
+      // Rozbij wpis, np. "Lodowa 54, 56, 60"
       const segments = raw.split(',').map(s => s.trim()).filter(Boolean);
 
       const addresses = [];
       let lastStreet = null;
       const lettersRegex = /[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]/;
-      const streetRegex = /^(.+?)\s+\d/;   // wszystko przed pierwszym numerem traktujemy jako nazwę ulicy
+      const streetRegex = /^(.+?)\s+\d/;
 
       for (const seg of segments) {
         const part = seg;
 
         if (lettersRegex.test(part) && /\d/.test(part)) {
-          // Pełny adres z ulicą i numerem – zapamiętujemy ulicę
           const m = part.match(streetRegex);
           if (m) lastStreet = m[1].trim();
           addresses.push(part);
         } else if (lastStreet && /\d/.test(part) && !lettersRegex.test(part)) {
-          // Sam numer (np. "56") – dokładamy ostatnią ulicę ("Lodowa 56")
           addresses.push(`${lastStreet} ${part}`);
         } else {
-          // Nie rozpoznano – zostawiamy jak jest
           addresses.push(part);
         }
       }
 
-      // Dodaj "Łódź," jeśli nie ma miasta
       const finalAddresses = addresses
         .slice(0, MAX_BUILDINGS)
         .map(a => {
@@ -401,7 +406,6 @@ out body;
       const allPoints = [];
       let foundCount = 0;
 
-      // Dalej używamy finalAddresses zamiast addresses
       for (const addr of finalAddresses) {
         try {
           const geo = await geocode(addr);
@@ -431,7 +435,7 @@ out body;
             }
             if (usedFromNominatim) {
               if (myId !== lastRequestId) return;
-              continue; // mamy polygon budynku, nie trzeba Overpass
+              continue;
             }
           }
 
@@ -448,11 +452,7 @@ out body;
           for (const w of ways) {
             const coords = w.nodes.map(id => nodeMap.get(id)).filter(Boolean);
             if (coords.length >= 3) {
-              rings.push({
-                coords,
-                tags: w.tags || {},
-                area: polygonAreaApprox(coords)
-              });
+              rings.push({ coords, tags: w.tags || {}, area: polygonAreaApprox(coords) });
             }
           }
 
@@ -465,27 +465,22 @@ out body;
               if (!way) continue;
               const coords = way.nodes.map(id => nodeMap.get(id)).filter(Boolean);
               if (coords.length >= 3) {
-                rings.push({
-                  coords,
-                  tags: way.tags || {},
-                  area: polygonAreaApprox(coords)
-                });
+                rings.push({ coords, tags: way.tags || {}, area: polygonAreaApprox(coords) });
               }
             }
           }
 
           if (rings.length === 0) { continue; }
 
-          // parsowanie adresu: ulica + numer
           const m = addr.match(/(.*)\s+(\d+[a-zA-Z0-9\-\/]*)$/);
           const wanted = {};
           if (m) { wanted.street = normalize(m[1]); wanted.number = normalize(m[2]); }
 
-          // filtrujemy: dokładny addr:* lub point-in-polygon
           const matches = [];
           for (const r of rings) {
             const tags = r.tags || {};
             let accept = false;
+
             if (tags['addr:housenumber'] || tags['addr:street']) {
               const tagNum = normalize(tags['addr:housenumber'] || '');
               const tagStreet = normalize(tags['addr:street'] || tags['addr:street:name'] || '');
@@ -499,22 +494,17 @@ out body;
             if (accept) matches.push(r);
           }
 
-          // wybór finalnych budynków
           let finalPicked = [];
 
           if (matches.length) {
-            // SPECJALNY przypadek: Bartoka 1 – wybierz największy z DOPASOWANYCH
             if (wanted.street === 'bartoka' && wanted.number === '1') {
               let largest = matches[0];
-              for (const r of matches) {
-                if (r.area > largest.area) largest = r;
-              }
+              for (const r of matches) if (r.area > largest.area) largest = r;
               finalPicked = [largest.coords];
             } else {
               finalPicked = matches.map(r => r.coords);
             }
           } else {
-            // fallback: najbliższy budynek
             const wayInfos = rings.map(rr => {
               const coords = rr.coords;
               let sumLat=0,sumLon=0;
@@ -534,15 +524,20 @@ out body;
           }
 
         } catch (err) {
-          // cicho obsługujemy błędy
+          // cicho
         }
       }
 
       if (buildingRings.length) {
         updateHighlightSvg();
+
+        // =========================================================
+        //  KLUCZ: zawsze ustawiamy TEN SAM zoom,
+        //  a mapę tylko centrujemy na wynikach
+        // =========================================================
         const tmpPoly = L.polygon([].concat(...buildingRings));
-        const FIXED_ZOOM = 18; // <- tu ustaw swoją "stałą skalę"
         map.setView(tmpPoly.getBounds().getCenter(), FIXED_ZOOM, { animate: true });
+
         setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
       } else {
         setStatus('Nie znaleziono precyzyjnych dopasowań dla podanych adresów.', true);
@@ -553,6 +548,7 @@ out body;
       clearHighlight();
       await showBuildingsForAddresses();
     });
+
     adresInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         clearHighlight();
@@ -562,6 +558,7 @@ out body;
 
     // --- Eksport PNG 10x15 cm @300 DPI ---
     const HTML2CANVAS_SCALE = 3;
+
     async function saveFramePng() {
       if (!frameVisible) { setStatus('Najpierw włącz ramkę kopiowania.', true); return; }
       try {
@@ -608,6 +605,7 @@ out body;
         setStatus('Błąd tworzenia PNG. Użyj ręcznego zrzutu jako fallback.', true);
       }
     }
+
     btnSave.addEventListener('click', saveFramePng);
 
     function handleColorInput(e) {
