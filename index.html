@@ -541,7 +541,7 @@ out body;
       if (buildingRings.length) {
         updateHighlightSvg();
         const tmpPoly = L.polygon([].concat(...buildingRings));
-        const FIXED_ZOOM = 16; // <- tu ustaw swoją "stałą skalę"
+        const FIXED_ZOOM = 20; // <- tu ustaw swoją "stałą skalę"
         map.setView(tmpPoly.getBounds().getCenter(), FIXED_ZOOM, { animate: true });
         setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
       } else {
