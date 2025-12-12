@@ -541,7 +541,8 @@ out body;
       if (buildingRings.length) {
         updateHighlightSvg();
         const tmpPoly = L.polygon([].concat(...buildingRings));
-        map.fitBounds(tmpPoly.getBounds().pad(0.6));
+        const FIXED_ZOOM = 16; // <- tu ustaw swoją "stałą skalę"
+        map.setView(tmpPoly.getBounds().getCenter(), FIXED_ZOOM, { animate: true });
         setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
       } else {
         setStatus('Nie znaleziono precyzyjnych dopasowań dla podanych adresów.', true);
