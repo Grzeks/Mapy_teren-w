@@ -82,7 +82,7 @@
     //  STAŁY ZOOM – ustaw tutaj:
     // =========================================================
     const FIXED_ZOOM = 17;   // <- wpisz swój zoom (np. 17, 18, 19...)
-    const LOCK_ZOOM  = true; // <- true = użytkownik nie zmieni zoomu ręcznie
+    const LOCK_ZOOM  = false; // <- true = użytkownik nie zmieni zoomu ręcznie
     // =========================================================
 
     // --- Inicjalizacja mapy ---
@@ -555,7 +555,7 @@ out body;
         //  a mapę tylko centrujemy na wynikach
         // =========================================================
         const tmpPoly = L.polygon([].concat(...buildingRings));
-        map.setView(tmpPoly.getBounds().getCenter(), FIXED_ZOOM, { animate: false });
+        map.setView(tmpPoly.getBounds().getCenter(), FIXED_ZOOM, { animate: true });
 
         setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
       } else {
