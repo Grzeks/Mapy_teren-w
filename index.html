@@ -555,7 +555,7 @@ out body;
         //  a mapę tylko centrujemy na wynikach
         // =========================================================
         const tmpPoly = L.polygon([].concat(...buildingRings));
-        map.setView(tmpPoly.getBounds().getCenter(), FIXED_ZOOM, { animate: true });
+        map.setView(tmpPoly.getBounds().getCenter(), FIXED_ZOOM, { animate: false });
 
         setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
       } else {
