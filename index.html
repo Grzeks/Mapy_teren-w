@@ -2,7 +2,7 @@
 <html lang="pl">
 <head>
   <meta charset="utf-8" />
-  <title>Podświetlone budynki – final (precyzyjne dopasowanie)</title>
+  <title>Podświetlone budynki + ulice (zakres)</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
@@ -12,13 +12,14 @@
     body { font-family: system-ui, sans-serif; margin:0; padding:0; }
     header { padding:10px; background:#222; color:#f5f5f5; }
     #controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-
     .flex-break { flex-basis: 100%; height: 0; }
 
     #adres { min-width:320px; padding:4px 8px; }
+    #ulice { min-width:420px; padding:4px 8px; }
     #filename { min-width:220px; padding:4px 8px; }
+
     #status { margin-top:6px; font-size:0.9em; color:#d0ffd0; }
-    #map-container { position:relative; height:calc(100vh - 120px); width:100%; overflow:hidden; }
+    #map-container { position:relative; height:calc(100vh - 140px); width:100%; overflow:hidden; }
     #map { height:100%; width:100%; }
 
     #crop-frame {
@@ -47,8 +48,8 @@
 <body>
   <header>
     <div id="controls">
-      <span>Adresy (oddzielone przecinkami):</span>
-      <input id="adres" type="text" value="" />
+      <span>Adresy (budynki, przecinki):</span>
+      <input id="adres" type="text" value="" placeholder="np. Listopadowa 111, 113, 115A/2" />
 
       <label class="inline">Kolor 1:
         <input id="color-picker-1" type="color" value="#e73eea" />
@@ -58,16 +59,22 @@
         <input id="color-picker-2" type="color" value="#0666e5" />
       </label>
 
+      <div class="flex-break"></div>
+
+      <span>Ulice (zakresy, przecinki):</span>
+      <input id="ulice" type="text" value="" placeholder="np. Piotrkowska 10-20, Listopadowa 111-125A" />
+      <button id="btn-streets">Pokaż ulice (zakres)</button>
+
       <label class="inline">
         <input id="chk-streets" type="checkbox" checked />
-        Zaznacz ulice na czerwono
+        Pokazuj ulice na czerwono
       </label>
+
+      <div class="flex-break"></div>
 
       <label class="inline">Nazwa pliku:
         <input id="filename" type="text" value="Teren_nr_" />
       </label>
-
-      <div class="flex-break"></div>
 
       <button id="btn-show">Pokaż budynki</button>
       <button id="btn-frame">Pokaż ramkę 10x15 cm</button>
@@ -86,8 +93,8 @@
     // =========================================================
     //  STAŁY ZOOM – ustaw tutaj:
     // =========================================================
-    const FIXED_ZOOM = 17;    // <- wpisz swój zoom (np. 17, 18, 19...)
-    const LOCK_ZOOM  = false; // <- true = użytkownik nie zmieni zoomu ręcznie
+    const FIXED_ZOOM = 17;
+    const LOCK_ZOOM  = false;
     // =========================================================
 
     // --- Inicjalizacja mapy ---
@@ -107,13 +114,15 @@
 
     // DOM
     const adresInput = document.getElementById('adres');
+    const uliceInput = document.getElementById('ulice');
     const btnShow = document.getElementById('btn-show');
+    const btnStreets = document.getElementById('btn-streets');
     const btnFrame = document.getElementById('btn-frame');
     const btnSave = document.getElementById('btn-save');
     const colorPicker1 = document.getElementById('color-picker-1');
     const colorPicker2 = document.getElementById('color-picker-2');
     const chkStreets = document.getElementById('chk-streets');
-    let activeColorPicker = colorPicker1; // domyślnie Kolor 1
+    let activeColorPicker = colorPicker1;
     const filenameInput = document.getElementById('filename');
     const statusEl = document.getElementById('status');
     const mapContainer = document.getElementById('map-container');
@@ -124,7 +133,6 @@
       statusEl.textContent = text;
       statusEl.style.color = isError ? '#ff8080' : '#d0ffd0';
     }
-
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
     // --- Wymiary 10x15 cm @300dpi ---
@@ -271,8 +279,7 @@
     map.on('move zoom', () => { if (frameVisible) updateCropFrame(); });
     window.addEventListener('resize', () => { if (frameVisible) updateCropFrame(); });
 
-    // --- SVG highlight (multi) ---
-    const MAX_BUILDINGS = Infinity; // bez limitu
+    // --- SVG highlight (budynki) ---
     let buildingRings = [];
 
     function clearHighlight() {
@@ -283,6 +290,15 @@
     function clearStreets() {
       streetLayer.clearLayers();
     }
+
+    // włącz/wyłącz widoczność ulic checkboxem
+    chkStreets.addEventListener('change', () => {
+      if (chkStreets.checked) {
+        if (!map.hasLayer(streetLayer)) streetLayer.addTo(map);
+      } else {
+        if (map.hasLayer(streetLayer)) map.removeLayer(streetLayer);
+      }
+    });
 
     function hexToRgba(hex, alpha = 0.35) {
       const c = hex.replace('#','');
@@ -331,7 +347,7 @@
       return Math.abs(area) / 2;
     }
 
-    // --- Geocoding + Overpass + precyzyjne filtrowanie ---
+    // --- Geocoding + Overpass (budynki) ---
     async function geocode(address) {
       const url = 'https://nominatim.openstreetmap.org/search?' +
         new URLSearchParams({ format:'json', limit:'1', q: address, polygon_geojson: 1 });
@@ -384,32 +400,11 @@ out body;
       return m ? m[1].trim() : null;
     }
 
-    // ===== Ulice: tylko okolica budynków (bbox) =====
+    // =========================================================
+    //  U L I C E  (ZAKRES OD–DO) – osobny moduł
+    // =========================================================
     function opEscape(s) {
       return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    }
-
-    async function fetchStreetWaysByBBox(bbox, streetNames) {
-      // bbox: { south, west, north, east }
-      const { south, west, north, east } = bbox;
-
-      const parts = streetNames.map(nm => {
-        const nn = opEscape(nm);
-        return `way["highway"]["name"="${nn}"](${south},${west},${north},${east});`;
-      }).join('\n  ');
-
-      const query = `
-[out:json][timeout:25];
-(
-  ${parts}
-);
-out geom;
-`;
-
-      const resp = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
-      if (!resp.ok) throw new Error('Błąd Overpass (ulice)');
-      const data = await resp.json();
-      return data.elements || [];
     }
 
     function boundsToBboxObj(bounds) {
@@ -418,78 +413,341 @@ out geom;
       return { south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng };
     }
 
-    // proste “przycinanie” linii do bbox: zostawiamy tylko odcinki, gdzie punkty są wewnątrz bounds
-    function clipPolylineToBounds(points, bounds) {
-      const segs = [];
-      let cur = [];
-
-      for (const p of points) {
-        const ll = L.latLng(p[0], p[1]);
-        if (bounds.contains(ll)) {
-          cur.push([ll.lat, ll.lng]);
-        } else {
-          if (cur.length >= 2) segs.push(cur);
-          cur = [];
-        }
-      }
-      if (cur.length >= 2) segs.push(cur);
-      return segs;
+    async function fetchHighwayWaysByNameBBox(streetName, bbox) {
+      const { south, west, north, east } = bbox;
+      const nn = opEscape(streetName);
+      const query = `
+[out:json][timeout:25];
+(
+  way["highway"]["name"="${nn}"](${south},${west},${north},${east});
+);
+out geom;
+`;
+      const resp = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
+      if (!resp.ok) throw new Error('Błąd Overpass (ulice)');
+      const data = await resp.json();
+      return (data.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 2);
     }
 
-    async function highlightStreetsNearBuildings(streetNames, focusBounds, myId) {
-      clearStreets();
-      if (!streetNames || !streetNames.length) return { ways: 0, segs: 0 };
+    // parsowanie: "Piotrkowska 10-20" / "Piotrkowska 10 do 20"
+    function parseStreetRanges(raw) {
+      const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+      const out = [];
+      for (const p of parts) {
+        const m = p.match(/^(.*?)(\d+[A-Za-z0-9\/\-]*)\s*(?:-|–|—|\bdo\b)\s*(\d+[A-Za-z0-9\/\-]*)\s*$/i);
+        if (!m) continue;
+        const street = m[1].trim();
+        const from = m[2].trim();
+        const to = m[3].trim();
+        if (!street || !from || !to) continue;
+        out.push({ street, from, to, raw: p });
+      }
+      return out;
+    }
 
-      // trochę większa “strefa” do pobrania i rysowania
-      const queryBounds = focusBounds.pad(0.35);  // pobranie
-      const drawBounds  = focusBounds.pad(0.25);  // przycinanie
+    // dystans (metry) – haversine
+    function distMeters(a, b) {
+      const R = 6371000;
+      const toRad = (d) => d * Math.PI / 180;
+      const dLat = toRad(b.lat - a.lat);
+      const dLon = toRad(b.lng - a.lng);
+      const lat1 = toRad(a.lat);
+      const lat2 = toRad(b.lat);
+      const sin1 = Math.sin(dLat/2), sin2 = Math.sin(dLon/2);
+      const h = sin1*sin1 + Math.cos(lat1)*Math.cos(lat2)*sin2*sin2;
+      return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+    }
 
-      const bbox = boundsToBboxObj(queryBounds);
+    // projekcja punktu na odcinek (aproksymacja equirect)
+    function projectPointToSegment(P, A, B) {
+      const R = 6371000;
+      const lat0 = (A.lat + B.lat + P.lat) / 3 * Math.PI/180;
+      const cos0 = Math.cos(lat0);
 
-      // batchowanie, bo Overpass nie lubi gigantycznych query
-      const BATCH = 25;
-      let totalWays = 0;
-      let totalSegs = 0;
+      const toXY = (ll) => {
+        const x = (ll.lng * Math.PI/180) * R * cos0;
+        const y = (ll.lat * Math.PI/180) * R;
+        return { x, y };
+      };
+      const toLL = (x, y) => {
+        const lat = (y / R) * 180/Math.PI;
+        const lng = (x / (R * cos0)) * 180/Math.PI;
+        return L.latLng(lat, lng);
+      };
 
-      for (let i = 0; i < streetNames.length; i += BATCH) {
-        if (myId !== lastRequestId) return { ways: totalWays, segs: totalSegs };
+      const p = toXY(P), a = toXY(A), b = toXY(B);
+      const abx = b.x - a.x, aby = b.y - a.y;
+      const apx = p.x - a.x, apy = p.y - a.y;
+      const ab2 = abx*abx + aby*aby;
+      let t = ab2 ? (apx*abx + apy*aby) / ab2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const x = a.x + t*abx;
+      const y = a.y + t*aby;
+      const proj = toLL(x, y);
 
-        const batch = streetNames.slice(i, i + BATCH);
-        try {
-          const elems = await fetchStreetWaysByBBox(bbox, batch);
-          if (myId !== lastRequestId) return { ways: totalWays, segs: totalSegs };
+      const d = Math.hypot(p.x - x, p.y - y);
+      return { proj, t, d };
+    }
 
-          const ways = elems.filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 2);
-          totalWays += ways.length;
+    function toKey(ll) {
+      // zaokrąglenie, żeby skleić “prawie te same” punkty
+      return `${ll.lat.toFixed(6)},${ll.lng.toFixed(6)}`;
+    }
 
-          for (const w of ways) {
-            const pts = w.geometry.map(p => [p.lat, p.lon]);
-
-            // przytnij do obszaru, żeby nie rysować “ogonów”
-            const segs = clipPolylineToBounds(pts, drawBounds);
-            totalSegs += segs.length;
-
-            for (const seg of segs) {
-              L.polyline(seg, {
-                color: '#ff0000',
-                weight: 5,
-                opacity: 0.9,
-                lineCap: 'round',
-                lineJoin: 'round'
-              }).addTo(streetLayer);
-            }
-          }
-
-        } catch (e) {
-          // cicho
+    // prosta kolejka priorytetowa (kopiec)
+    class MinHeap {
+      constructor() { this.a = []; }
+      push(item) {
+        this.a.push(item);
+        this._up(this.a.length - 1);
+      }
+      pop() {
+        if (!this.a.length) return null;
+        const top = this.a[0];
+        const last = this.a.pop();
+        if (this.a.length) {
+          this.a[0] = last;
+          this._down(0);
         }
+        return top;
+      }
+      _up(i) {
+        while (i > 0) {
+          const p = (i - 1) >> 1;
+          if (this.a[p].d <= this.a[i].d) break;
+          [this.a[p], this.a[i]] = [this.a[i], this.a[p]];
+          i = p;
+        }
+      }
+      _down(i) {
+        const n = this.a.length;
+        for (;;) {
+          let l = i*2+1, r = l+1, m = i;
+          if (l < n && this.a[l].d < this.a[m].d) m = l;
+          if (r < n && this.a[r].d < this.a[m].d) m = r;
+          if (m === i) break;
+          [this.a[m], this.a[i]] = [this.a[i], this.a[m]];
+          i = m;
+        }
+      }
+    }
 
+    function dijkstra(adj, startK, endK) {
+      const dist = new Map();
+      const prev = new Map();
+      const heap = new MinHeap();
+
+      dist.set(startK, 0);
+      heap.push({ k: startK, d: 0 });
+
+      while (true) {
+        const cur = heap.pop();
+        if (!cur) break;
+        const { k, d } = cur;
+        if (d !== dist.get(k)) continue;
+        if (k === endK) break;
+
+        const nbrs = adj.get(k);
+        if (!nbrs) continue;
+
+        for (const { to, w } of nbrs) {
+          const nd = d + w;
+          if (nd < (dist.get(to) ?? Infinity)) {
+            dist.set(to, nd);
+            prev.set(to, k);
+            heap.push({ k: to, d: nd });
+          }
+        }
+      }
+
+      if (!dist.has(endK)) return null;
+
+      const path = [];
+      let k = endK;
+      while (k != null) {
+        path.push(k);
+        if (k === startK) break;
+        k = prev.get(k);
+      }
+      path.reverse();
+      return path;
+    }
+
+    async function highlightOneStreetRange(range, requestId) {
+      const street = range.street;
+
+      // 1) geokoduj końce
+      const a1 = `Łódź, ${street} ${range.from}`;
+      const a2 = `Łódź, ${street} ${range.to}`;
+
+      const g1 = await geocode(a1);
+      if (requestId !== lastStreetRequestId) return null;
+      const g2 = await geocode(a2);
+      if (requestId !== lastStreetRequestId) return null;
+
+      if (!g1 || !g2) return { ok:false, reason:`Brak geokodowania: ${range.raw}` };
+
+      const p1 = L.latLng(g1[0], g1[1]);
+      const p2 = L.latLng(g2[0], g2[1]);
+
+      // 2) pobierz ulicę w bbox wokół obu punktów
+      const bounds = L.latLngBounds([p1, p2]).pad(0.55);
+      const bbox = boundsToBboxObj(bounds);
+
+      const ways = await fetchHighwayWaysByNameBBox(street, bbox);
+      if (requestId !== lastStreetRequestId) return null;
+
+      if (!ways.length) return { ok:false, reason:`Brak geometrii OSM dla: ${street}` };
+
+      // 3) zbuduj graf
+      const adj = new Map();        // key -> [{to,w}]
+      const coordsByKey = new Map();// key -> L.LatLng
+
+      function ensureNode(ll) {
+        const k = toKey(ll);
+        if (!coordsByKey.has(k)) coordsByKey.set(k, ll);
+        if (!adj.has(k)) adj.set(k, []);
+        return k;
+      }
+      function addEdge(k1, k2, w) {
+        adj.get(k1).push({ to: k2, w });
+      }
+
+      // normalne krawędzie z geometrii
+      for (const w of ways) {
+        const pts = w.geometry.map(p => L.latLng(p.lat, p.lon));
+        for (let i = 0; i < pts.length - 1; i++) {
+          const A = pts[i], B = pts[i+1];
+          const kA = ensureNode(A);
+          const kB = ensureNode(B);
+          const wAB = distMeters(A, B);
+          addEdge(kA, kB, wAB);
+          addEdge(kB, kA, wAB);
+        }
+      }
+
+      // 4) znajdź najbliższe odcinki dla p1 i p2 (projekcja)
+      function findBestProjection(P) {
+        let best = null;
+        for (const w of ways) {
+          const pts = w.geometry.map(p => L.latLng(p.lat, p.lon));
+          for (let i = 0; i < pts.length - 1; i++) {
+            const A = pts[i], B = pts[i+1];
+            const pr = projectPointToSegment(P, A, B);
+            if (!best || pr.d < best.d) best = { ...pr, A, B };
+          }
+        }
+        return best;
+      }
+
+      const pr1 = findBestProjection(p1);
+      const pr2 = findBestProjection(p2);
+      if (!pr1 || !pr2) return { ok:false, reason:`Nie udało się dopasować odcinka: ${range.raw}` };
+
+      const kA1 = ensureNode(pr1.A);
+      const kB1 = ensureNode(pr1.B);
+      const kP1 = ensureNode(pr1.proj);
+
+      const kA2 = ensureNode(pr2.A);
+      const kB2 = ensureNode(pr2.B);
+      const kP2 = ensureNode(pr2.proj);
+
+      // połącz projekcje z końcami segmentu
+      const wP1A = distMeters(pr1.proj, pr1.A), wP1B = distMeters(pr1.proj, pr1.B);
+      addEdge(kP1, kA1, wP1A); addEdge(kA1, kP1, wP1A);
+      addEdge(kP1, kB1, wP1B); addEdge(kB1, kP1, wP1B);
+
+      const wP2A = distMeters(pr2.proj, pr2.A), wP2B = distMeters(pr2.proj, pr2.B);
+      addEdge(kP2, kA2, wP2A); addEdge(kA2, kP2, wP2A);
+      addEdge(kP2, kB2, wP2B); addEdge(kB2, kP2, wP2B);
+
+      // 5) dijkstra po grafie
+      const pathKeys = dijkstra(adj, kP1, kP2);
+      if (!pathKeys || pathKeys.length < 2) {
+        return { ok:false, reason:`Brak ścieżki po ulicy dla: ${range.raw}` };
+      }
+
+      const path = pathKeys.map(k => coordsByKey.get(k)).filter(Boolean).map(ll => [ll.lat, ll.lng]);
+
+      // 6) rysuj
+      const line = L.polyline(path, {
+        color: '#ff0000',
+        weight: 6,
+        opacity: 0.95,
+        lineCap: 'round',
+        lineJoin: 'round'
+      }).addTo(streetLayer);
+
+      return { ok:true, line };
+    }
+
+    let lastStreetRequestId = 0;
+
+    async function showStreetsRanges() {
+      const raw = uliceInput.value.trim();
+      if (!raw) { setStatus('Podaj ulicę i zakres, np. "Piotrkowska 10-20".', true); return; }
+
+      const ranges = parseStreetRanges(raw);
+      if (!ranges.length) {
+        setStatus('Nie rozpoznano zakresów. Format: "Ulica 10-20, Inna 111-125A".', true);
+        return;
+      }
+
+      if (chkStreets.checked) {
+        if (!map.hasLayer(streetLayer)) streetLayer.addTo(map);
+      } else {
+        // rysujemy, ale warstwa może być ukryta
+      }
+
+      clearStreets();
+      const requestId = ++lastStreetRequestId;
+
+      setStatus(`Rysuję ulice (zakresy): ${ranges.length}…`);
+
+      let drawn = 0;
+      let fail = 0;
+      const allBounds = [];
+
+      for (const r of ranges) {
+        try {
+          const res = await highlightOneStreetRange(r, requestId);
+          if (requestId !== lastStreetRequestId) return;
+
+          if (res && res.ok && res.line) {
+            drawn++;
+            allBounds.push(res.line.getBounds());
+          } else if (res && res.ok === false) {
+            fail++;
+          } else {
+            // anulowane
+            return;
+          }
+        } catch (e) {
+          fail++;
+        }
         await sleep(250);
       }
 
-      return { ways: totalWays, segs: totalSegs };
+      if (drawn === 0) {
+        setStatus('Nie udało się narysować żadnego zakresu ulic.', true);
+        return;
+      }
+
+      // ustaw widok (stały zoom, tylko centrowanie)
+      const merged = allBounds.reduce((b, nb) => b.extend(nb), allBounds[0]);
+      map.setView(merged.getCenter(), FIXED_ZOOM, { animate: true });
+
+      setStatus(`Ulice narysowane: ${drawn}. Błędy: ${fail}.`);
     }
 
+    btnStreets.addEventListener('click', showStreetsRanges);
+    uliceInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') showStreetsRanges();
+    });
+
+    // =========================================================
+    //  B U D Y N K I  – zostaje jak było (bez auto-ulic)
+    // =========================================================
     let lastRequestId = 0;
 
     async function showBuildingsForAddresses() {
@@ -498,58 +756,38 @@ out geom;
 
       setStatus('Szukam…');
       clearHighlight();
-      clearStreets();
       const myId = ++lastRequestId;
 
-      // Rozbij wpis, np. "Listopadowa 111, 113, 115A/2, Piotrkowska 10, 12"
       const segments = raw.split(',').map(s => s.trim()).filter(Boolean);
 
       const addresses = [];
       let lastStreet = null;
 
-      // sam numer domu (np. 113, 113A, 113/1, 113-115)
       const isHouseNumberOnly = (s) =>
         /^\d+[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż0-9\-\/]*$/.test(s);
 
-      // czy wygląda na "ulica + numer"
       const looksLikeStreetAndNumber = (s) =>
         /[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]/.test(s) && /\d/.test(s) && !!extractStreet(s);
 
       for (const part of segments) {
-        // 1) pełny wpis "ulica + numer" -> zapamiętaj ulicę
         if (looksLikeStreetAndNumber(part)) {
           const st = extractStreet(part);
           if (st) lastStreet = st;
           addresses.push(part);
           continue;
         }
-
-        // 2) sam numer -> dopnij do ostatniej ulicy
         if (lastStreet && isHouseNumberOnly(part)) {
           addresses.push(`${lastStreet} ${part}`);
           continue;
         }
-
-        // 3) cokolwiek innego -> zostaw jak jest (nie psuj lastStreet)
         addresses.push(part);
       }
 
-      // Ulice do podświetlenia (unikalne)
-      const streetSet = new Set();
-      for (const a of addresses) {
-        const st = extractStreet(a);
-        if (st) streetSet.add(st.trim());
-      }
-      const streetsToHighlight = Array.from(streetSet);
-
-      // Bez limitu adresów:
       const finalAddresses = addresses.map(a => {
         const lower = a.toLowerCase();
         if (!lower.includes('łódź') && !lower.includes('lodz')) return 'Łódź, ' + a;
         return a;
       });
-
-      const allPoints = [];
 
       for (const addr of finalAddresses) {
         try {
@@ -559,20 +797,18 @@ out geom;
           const nomiObj = geo[2];
           if (myId !== lastRequestId) return;
 
-          // --- Nominatim: polygon tylko gdy NIE jest to Bartoka 1 ---
+          // Nominatim polygon tylko gdy NIE jest to Bartoka 1
           let usedFromNominatim = false;
           if (nomiObj && nomiObj.geojson && !/bartoka\s+1\b/i.test(addr)) {
             const g = nomiObj.geojson;
             if (g.type === 'Polygon') {
               const ring = g.coordinates[0].map(([lon, lat]) => [lat, lon]);
               buildingRings.push(ring);
-              allPoints.push(...ring);
               usedFromNominatim = true;
             } else if (g.type === 'MultiPolygon') {
               for (const poly of g.coordinates) {
                 const ring = poly[0].map(([lon, lat]) => [lat, lon]);
                 buildingRings.push(ring);
-                allPoints.push(...ring);
               }
               usedFromNominatim = true;
             }
@@ -582,7 +818,7 @@ out geom;
             }
           }
 
-          // --- Overpass ---
+          // Overpass
           const elems = await fetchBuildingWays(center[0], center[1], 60);
           if (myId !== lastRequestId) return;
           if (!elems.length) { continue; }
@@ -638,7 +874,6 @@ out geom;
           }
 
           let finalPicked = [];
-
           if (matches.length) {
             if (wanted.street === 'bartoka' && wanted.number === '1') {
               let largest = matches[0];
@@ -659,10 +894,7 @@ out geom;
             if (wayInfos.length) finalPicked.push(wayInfos[0].coords);
           }
 
-          for (const p of finalPicked) {
-            buildingRings.push(p);
-            allPoints.push(...p);
-          }
+          for (const p of finalPicked) buildingRings.push(p);
 
         } catch (err) {
           // cicho
@@ -674,35 +906,23 @@ out geom;
         return;
       }
 
-      // Rysuj budynki
       updateHighlightSvg();
 
-      // Stały zoom, tylko centrowanie
       const tmpPoly = L.polygon([].concat(...buildingRings));
       const focusBounds = tmpPoly.getBounds();
       map.setView(focusBounds.getCenter(), FIXED_ZOOM, { animate: true });
 
-      // Ulice (czerwona kreska) – tylko okolica budynków
-      if (chkStreets.checked && streetsToHighlight.length) {
-        setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów). Rysuję ulice w okolicy…`);
-        const r = await highlightStreetsNearBuildings(streetsToHighlight, focusBounds, myId);
-        if (myId !== lastRequestId) return;
-        setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów). Ulice: ${streetsToHighlight.length} (ways: ${r.ways}, odcinki: ${r.segs}).`);
-      } else {
-        setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
-      }
+      setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
     }
 
     btnShow.addEventListener('click', async () => {
       clearHighlight();
-      clearStreets();
       await showBuildingsForAddresses();
     });
 
     adresInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         clearHighlight();
-        clearStreets();
         showBuildingsForAddresses();
       }
     });
