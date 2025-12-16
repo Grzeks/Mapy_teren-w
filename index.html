@@ -47,7 +47,7 @@
 <body>
   <header>
     <div id="controls">
-      <span>Adresy (max 6, oddzielone przecinkami):</span>
+      <span>Adresy (oddzielone przecinkami):</span>
       <input id="adres" type="text" value="" />
 
       <label class="inline">Kolor 1:
@@ -261,7 +261,7 @@
     window.addEventListener('resize', () => { if (frameVisible) updateCropFrame(); });
 
     // --- SVG highlight (multi) ---
-    const MAX_BUILDINGS = 6;
+    const MAX_BUILDINGS = Infinity; // <-- bez limitu
     let buildingRings = [];
 
     function clearHighlight() {
@@ -373,27 +373,26 @@ out body;
       clearHighlight();
       const myId = ++lastRequestId;
 
-      // Rozbij wpis, np. "Lodowa 54, 56, 60"
       // Rozbij wpis, np. "Listopadowa 111, 113, 115A/2, Piotrkowska 10, 12"
       const segments = raw.split(',').map(s => s.trim()).filter(Boolean);
-      
+
       const addresses = [];
       let lastStreet = null;
-      
+
       // sam numer domu (np. 113, 113A, 113/1, 113-115)
       const isHouseNumberOnly = (s) =>
         /^\d+[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż0-9\-\/]*$/.test(s);
-      
+
       // "Ulica 123" -> wyciągnij "Ulica"
       const extractStreet = (s) => {
         const m = s.match(/^(.+?)\s+\d/);
         return m ? m[1].trim() : null;
       };
-      
+
       // czy wygląda na "ulica + numer"
       const looksLikeStreetAndNumber = (s) =>
         /[A-Za-zĄąĆćĘęŁłŃńÓóŚśŹźŻż]/.test(s) && /\d/.test(s) && !!extractStreet(s);
-      
+
       for (const part of segments) {
         // 1) pełny wpis "ulica + numer" -> zapamiętaj ulicę
         if (looksLikeStreetAndNumber(part)) {
@@ -402,25 +401,23 @@ out body;
           addresses.push(part);
           continue;
         }
-      
+
         // 2) sam numer -> dopnij do ostatniej ulicy
         if (lastStreet && isHouseNumberOnly(part)) {
           addresses.push(`${lastStreet} ${part}`);
           continue;
         }
-      
+
         // 3) cokolwiek innego -> zostaw jak jest (nie psuj lastStreet)
         addresses.push(part);
       }
 
-
-      const finalAddresses = addresses
-        .slice(0, MAX_BUILDINGS)
-        .map(a => {
-          const lower = a.toLowerCase();
-          if (!lower.includes('łódź') && !lower.includes('lodz')) return 'Łódź, ' + a;
-          return a;
-        });
+      // Bez limitu adresów:
+      const finalAddresses = addresses.map(a => {
+        const lower = a.toLowerCase();
+        if (!lower.includes('łódź') && !lower.includes('lodz')) return 'Łódź, ' + a;
+        return a;
+      });
 
       const allPoints = [];
       let foundCount = 0;
@@ -536,7 +533,7 @@ out body;
           }
 
           for (const p of finalPicked) {
-            if (buildingRings.length >= MAX_BUILDINGS) break;
+            // bez limitu
             buildingRings.push(p);
             allPoints.push(...p);
             foundCount++;
