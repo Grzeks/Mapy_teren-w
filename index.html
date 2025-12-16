@@ -10,16 +10,17 @@
 
   <style>
     body { font-family: system-ui, sans-serif; margin:0; padding:0; }
-    header { padding:10px; background:#222; color:#f5f5f5; }
-    #controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    header { padding:8px; background:#222; color:#f5f5f5; }
+    #controls { display:flex; gap:6px; align-items:center; flex-wrap:wrap; font-size:13px; }
     .flex-break { flex-basis: 100%; height: 0; }
 
-    #adres { min-width:320px; padding:4px 8px; }
-    #ulice { min-width:420px; padding:4px 8px; }
-    #filename { min-width:220px; padding:4px 8px; }
+    #adres  { min-width:260px; width:260px; padding:3px 6px; }
+    #ulice  { min-width:240px; width:240px; padding:3px 6px; }
+    #filename { min-width:160px; width:160px; padding:3px 6px; }
+
     #status { margin-top:6px; font-size:0.9em; color:#d0ffd0; }
 
-    #map-container { position:relative; height:calc(100vh - 160px); width:100%; overflow:hidden; }
+    #map-container { position:relative; height:calc(100vh - 135px); width:100%; overflow:hidden; }
     #map { height:100%; width:100%; }
 
     #crop-frame {
@@ -40,10 +41,10 @@
       pointer-events:none; z-index:900;
     }
 
-    button { padding:6px 10px; cursor:pointer; }
-    input[type="color"] { width:36px; height:28px; padding:0; border:0; background:transparent; cursor:pointer; }
-    label.inline { display:inline-flex; align-items:center; gap:6px; }
-    input[type="range"] { width:140px; }
+    button { padding:4px 8px; cursor:pointer; }
+    input[type="color"] { width:34px; height:24px; padding:0; border:0; background:transparent; cursor:pointer; }
+    input[type="range"] { width:90px; }
+    label.inline { display:inline-flex; align-items:center; gap:4px; }
     .mono { font-variant-numeric: tabular-nums; }
   </style>
 </head>
@@ -51,54 +52,50 @@
 <body>
   <header>
     <div id="controls">
-      <span>Adresy (budynki, przecinki):</span>
-      <input id="adres" type="text" value="" placeholder="np. Listopadowa 111, 113, 115A/2" />
+      <span>Adresy:</span>
+      <input id="adres" type="text" value="" placeholder="np. Lodowa 54, 56" />
 
-      <label class="inline">Kolor 1:
-        <input id="color-picker-1" type="color" value="#e73eea" />
-      </label>
+      <span>Kolor 1:</span>
+      <input id="color-picker-1" type="color" value="#e73eea" />
 
-      <label class="inline">Kolor 2:
-        <input id="color-picker-2" type="color" value="#0666e5" />
-      </label>
+      <span>Kolor 2:</span>
+      <input id="color-picker-2" type="color" value="#0666e5" />
 
       <button id="btn-show">Pokaż budynki</button>
 
+      <span>Nazwa:</span>
+      <input id="filename" type="text" value="Teren_nr_" />
+
+      <button id="btn-frame">Ramka 10x15</button>
+      <button id="btn-save">Zapisz PNG</button>
+
       <div class="flex-break"></div>
 
-      <span>Ulice (zakresy, przecinki):</span>
-      <input id="ulice" type="text" value="" placeholder='np. Jędrowizna 1-38, Skarna 53-65A' />
-      <button id="btn-streets">Pokaż ulice (zakres)</button>
+      <span>Ulice:</span>
+      <input id="ulice" type="text" value="" placeholder="np. Halna 1-77, Halna" />
+      <button id="btn-streets">Pokaż ulice</button>
 
       <label class="inline">
         <input id="chk-streets" type="checkbox" checked />
-        Zaznacz ulice na czerwono
+        Czerwono
       </label>
 
       <label class="inline">Grubość:
-        <input id="street-width" type="range" min="3" max="12" step="1" value="7" />
-        <span id="street-width-val" class="mono">7</span>
+        <input id="street-width" type="range" min="3" max="12" step="1" value="8" />
+        <span id="street-width-val" class="mono">8</span>
       </label>
 
-      <label class="inline">Przezroczystość:
-        <input id="street-opacity" type="range" min="0.20" max="1.00" step="0.05" value="0.65" />
-        <span id="street-opacity-val" class="mono">0.65</span>
+      <label class="inline">Przezr.:
+        <input id="street-opacity" type="range" min="0.20" max="1.00" step="0.05" value="0.55" />
+        <span id="street-opacity-val" class="mono">0.55</span>
       </label>
 
       <label class="inline">
-        <input id="street-dash" type="checkbox" checked />
+        <input id="street-dash" type="checkbox" />
         Przerywana
       </label>
-
-      <div class="flex-break"></div>
-
-      <label class="inline">Nazwa pliku:
-        <input id="filename" type="text" value="Teren_nr_" />
-      </label>
-
-      <button id="btn-frame">Pokaż ramkę 10x15 cm</button>
-      <button id="btn-save">Zapisz PNG (300 DPI)</button>
     </div>
+
     <div id="status"></div>
   </header>
 
@@ -114,6 +111,7 @@
   // =========================================================
   const FIXED_ZOOM = 17;
   const LOCK_ZOOM  = false;
+  const DEFAULT_CITY = 'Łódź'; // zgodnie z Twoim użyciem
   // =========================================================
 
   // --- Inicjalizacja mapy ---
@@ -156,6 +154,13 @@
     statusEl.style.color = isError ? '#ff8080' : '#d0ffd0';
   }
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function qualifyCity(q) {
+    const s = String(q || '').trim();
+    const low = s.toLowerCase();
+    if (low.includes('łódź') || low.includes('lodz') || low.includes(',')) return s;
+    return `${DEFAULT_CITY}, ${s}`;
+  }
 
   // --- Wymiary 10x15 cm @300dpi ---
   const DPI = 300;
@@ -287,14 +292,14 @@
       updateCropFrame();
       ensureCropVisible();
     });
-    btnFrame.textContent = 'Ukryj ramkę 10x15 cm';
+    btnFrame.textContent = 'Ukryj ramkę';
   }
 
   function hideFrame() {
     frameVisible = false;
     reattachCropFrameToContainer();
     cropFrame.style.setProperty('display','none','important');
-    btnFrame.textContent = 'Pokaż ramkę 10x15 cm';
+    btnFrame.textContent = 'Ramka 10x15';
   }
 
   btnFrame.addEventListener('click', () => { if (frameVisible) hideFrame(); else showFrame(); });
@@ -330,7 +335,7 @@
   function updateHighlightSvg() {
     while (highlightSvg.firstChild) highlightSvg.removeChild(highlightSvg.firstChild);
 
-    // ===== B U D Y N K I (jak było) =====
+    // ===== B U D Y N K I =====
     if (buildingRings.length) {
       const color = getActiveColor();
       const fill = hexToRgba(color, 0.35);
@@ -352,13 +357,12 @@
       }
     }
 
-    // ===== U L I C E (SVG -> zapisują się do PNG) =====
+    // ===== U L I C E (SVG -> zapis do PNG) =====
     if (chkStreets.checked && streetSegments.length) {
-      const w = parseInt(streetWidth.value, 10) || 7;
-      const op = parseFloat(streetOpacity.value) || 0.65;
+      const w = parseInt(streetWidth.value, 10) || 8;
+      const op = parseFloat(streetOpacity.value) || 0.55;
       const dashed = !!streetDash.checked;
 
-      // stałe, czytelne dash — możesz zmienić
       const dashA = Math.max(10, Math.round(w * 2.6));
       const dashB = Math.max(6,  Math.round(w * 1.6));
       const dashStr = `${dashA} ${dashB}`;
@@ -465,7 +469,7 @@ out body;
   }
 
   // =========================================================
-  //  U L I C E (zakres od-do) -> SVG (export PNG OK)
+  //  U L I C E (zakres od-do / cała ulica)
   // =========================================================
   function opEscape(s) {
     return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -492,19 +496,29 @@ out geom;
     return (data.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 2);
   }
 
-  // "Piotrkowska 10-20" / "Piotrkowska 10 do 20"
+  // zakresy + sama ulica
   function parseStreetRanges(raw) {
     const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
     const out = [];
+
     for (const p of parts) {
+      // zakres: "Ulica 1-77" / "Ulica 1 do 77"
       const m = p.match(/^(.*?)(\d+[A-Za-z0-9\/\-]*)\s*(?:-|–|—|\bdo\b)\s*(\d+[A-Za-z0-9\/\-]*)\s*$/i);
-      if (!m) continue;
-      const street = m[1].trim();
-      const from = m[2].trim();
-      const to = m[3].trim();
-      if (!street || !from || !to) continue;
-      out.push({ street, from, to, raw: p });
+      if (m) {
+        const street = m[1].trim();
+        const from = m[2].trim();
+        const to = m[3].trim();
+        if (street && from && to) out.push({ mode:'range', street, from, to, raw: p });
+        continue;
+      }
+
+      // sama ulica: "Halna" / "ul. Halna"
+      const streetOnly = p.replace(/^\s*(ulica|ul\.?)\s+/i, '').trim();
+      if (streetOnly && !/\d/.test(streetOnly)) {
+        out.push({ mode:'full', street: streetOnly, raw: p });
+      }
     }
+
     return out;
   }
 
@@ -551,9 +565,7 @@ out geom;
     return { proj, t, d };
   }
 
-  function toKey(ll) {
-    return `${ll.lat.toFixed(6)},${ll.lng.toFixed(6)}`;
-  }
+  function toKey(ll) { return `${ll.lat.toFixed(6)},${ll.lng.toFixed(6)}`; }
 
   class MinHeap {
     constructor() { this.a = []; }
@@ -627,23 +639,74 @@ out geom;
     return path;
   }
 
+  // fallback numerów: jeśli np. "77" nie istnieje -> cofamy (76..71..)
+  function splitHouseNo(h) {
+    const m = String(h).trim().match(/^(\d+)(.*)$/);
+    if (!m) return null;
+    return { n: parseInt(m[1], 10), rest: (m[2] || '').trim() };
+  }
+
+  async function geocodeWithFallback(street, house, tryDown = true, maxSteps = 30) {
+    const base = qualifyCity(`${street} ${house}`);
+    let g = await geocode(base);
+    if (g) return { geo: g, usedHouse: house, fallback: false };
+
+    const sp = splitHouseNo(house);
+    if (!sp) return { geo: null, usedHouse: house, fallback: false };
+
+    for (let i = 1; i <= maxSteps; i++) {
+      const nn = tryDown ? (sp.n - i) : (sp.n + i);
+      if (nn <= 0) break;
+
+      const candidate = `${nn}${sp.rest ? sp.rest : ''}`.trim();
+      g = await geocode(qualifyCity(`${street} ${candidate}`));
+      if (g) return { geo: g, usedHouse: candidate, fallback: true };
+    }
+
+    return { geo: null, usedHouse: house, fallback: false };
+  }
+
   let lastStreetRequestId = 0;
+
+  async function highlightWholeStreet(streetName, requestId) {
+    const bounds = map.getBounds().pad(0.60);
+    const bbox = boundsToBboxObj(bounds);
+
+    const ways = await fetchHighwayWaysByNameBBox(streetName, bbox);
+    if (requestId !== lastStreetRequestId) return null;
+    if (!ways.length) return { ok:false, reason:`Brak geometrii OSM dla: ${streetName}` };
+
+    let merged = null;
+
+    for (const w of ways) {
+      const pts = w.geometry.map(p => [p.lat, p.lon]);
+      if (pts.length < 2) continue;
+
+      streetSegments.push(pts);
+
+      const b = L.latLngBounds(pts.map(pp => L.latLng(pp[0], pp[1])));
+      merged = merged ? merged.extend(b) : b;
+    }
+
+    updateHighlightSvg();
+    return { ok:true, bounds: merged };
+  }
 
   async function highlightOneStreetRange(range, requestId) {
     const street = range.street;
 
-    const a1 = `Łódź, ${street} ${range.from}`;
-    const a2 = `Łódź, ${street} ${range.to}`;
-
-    const g1 = await geocode(a1);
-    if (requestId !== lastStreetRequestId) return null;
-    const g2 = await geocode(a2);
+    // od: próbujemy normalnie, a jak brak -> można iść w górę trochę
+    const r1 = await geocodeWithFallback(street, range.from, false, 15);
     if (requestId !== lastStreetRequestId) return null;
 
-    if (!g1 || !g2) return { ok:false, reason:`Brak geokodowania: ${range.raw}` };
+    // do: jak brak -> cofamy w dół (np. 77 -> 71)
+    const r2 = await geocodeWithFallback(street, range.to, true, 40);
+    if (requestId !== lastStreetRequestId) return null;
 
-    const p1 = L.latLng(g1[0], g1[1]);
-    const p2 = L.latLng(g2[0], g2[1]);
+    if (!r1.geo || !r2.geo) return { ok:false, reason:`Brak geokodowania: ${range.raw}` };
+
+    const p1 = L.latLng(r1.geo[0], r1.geo[1]);
+    const p2 = L.latLng(r2.geo[0], r2.geo[1]);
 
     const bounds = L.latLngBounds([p1, p2]).pad(0.55);
     const bbox = boundsToBboxObj(bounds);
@@ -714,20 +777,25 @@ out geom;
 
     const path = pathKeys.map(k => coordsByKey.get(k)).filter(Boolean).map(ll => [ll.lat, ll.lng]);
 
-    // DO SVG (zapis do PNG)
     streetSegments.push(path);
     updateHighlightSvg();
 
-    return { ok:true, path };
+    return {
+      ok:true,
+      path,
+      usedFrom: r1.usedHouse,
+      usedTo: r2.usedHouse,
+      fallbackUsed: (r1.fallback || r2.fallback)
+    };
   }
 
   async function showStreetsRanges() {
     const raw = uliceInput.value.trim();
-    if (!raw) { setStatus('Podaj ulicę i zakres, np. "Jędrowizna 1-38".', true); return; }
+    if (!raw) { setStatus('Podaj ulicę: "Halna" albo zakres "Halna 1-77".', true); return; }
 
     const ranges = parseStreetRanges(raw);
     if (!ranges.length) {
-      setStatus('Nie rozpoznano zakresów. Format: "Ulica 10-20, Inna 111-125A".', true);
+      setStatus('Nie rozpoznano wpisu. Format: "Ulica 10-20, Inna" (bez numerów = cała ulica).', true);
       return;
     }
 
@@ -735,41 +803,62 @@ out geom;
     chkStreets.checked = true;
 
     const requestId = ++lastStreetRequestId;
-    setStatus(`Rysuję ulice (zakresy): ${ranges.length}…`);
+    setStatus(`Rysuję ulice: ${ranges.length}…`);
 
-    let drawn = 0, fail = 0;
+    let drawn = 0, fail = 0, fallbackCount = 0;
     let merged = null;
 
     for (const r of ranges) {
       try {
-        const res = await highlightOneStreetRange(r, requestId);
-        if (requestId !== lastStreetRequestId) return;
+        let res = null;
 
-        if (res && res.ok && res.path) {
-          drawn++;
-          const b = L.latLngBounds(res.path.map(p => L.latLng(p[0], p[1])));
-          merged = merged ? merged.extend(b) : b;
-        } else {
-          fail++;
+        if (r.mode === 'range') {
+          res = await highlightOneStreetRange(r, requestId);
+          if (requestId !== lastStreetRequestId) return;
+
+          if (res && res.ok && res.path) {
+            drawn++;
+            if (res.fallbackUsed) fallbackCount++;
+            const b = L.latLngBounds(res.path.map(p => L.latLng(p[0], p[1])));
+            merged = merged ? merged.extend(b) : b;
+          } else {
+            fail++;
+          }
         }
+
+        if (r.mode === 'full') {
+          res = await highlightWholeStreet(r.street, requestId);
+          if (requestId !== lastStreetRequestId) return;
+
+          if (res && res.ok && res.bounds) {
+            drawn++;
+            merged = merged ? merged.extend(res.bounds) : res.bounds;
+          } else {
+            fail++;
+          }
+        }
+
       } catch (e) {
         fail++;
       }
-      await sleep(220);
+
+      await sleep(180);
     }
 
-    if (!drawn) { setStatus('Nie udało się narysować żadnego zakresu ulic.', true); return; }
+    if (!drawn) { setStatus('Nie udało się narysować żadnego zakresu/ulicy.', true); return; }
 
     map.setView(merged.getCenter(), FIXED_ZOOM, { animate: true });
     updateHighlightSvg();
-    setStatus(`Ulice narysowane: ${drawn}. Błędy: ${fail}.`);
+
+    const extra = fallbackCount ? ` (fallback: ${fallbackCount})` : '';
+    setStatus(`Ulice OK: ${drawn}, błędy: ${fail}${extra}.`);
   }
 
   btnStreets.addEventListener('click', showStreetsRanges);
   uliceInput.addEventListener('keydown', e => { if (e.key === 'Enter') showStreetsRanges(); });
 
   // =========================================================
-  //  B U D Y N K I – zostaje jak było
+  //  B U D Y N K I – jak było
   // =========================================================
   let lastRequestId = 0;
 
@@ -777,7 +866,7 @@ out geom;
     const raw = adresInput.value.trim();
     if (!raw) { setStatus('Podaj adresy.', true); return; }
 
-    setStatus('Szukam…');
+    setStatus('Szukam budynków…');
     clearHighlight();
     const myId = ++lastRequestId;
 
@@ -806,11 +895,7 @@ out geom;
       addresses.push(part);
     }
 
-    const finalAddresses = addresses.map(a => {
-      const lower = a.toLowerCase();
-      if (!lower.includes('łódź') && !lower.includes('lodz')) return 'Łódź, ' + a;
-      return a;
-    });
+    const finalAddresses = addresses.map(a => qualifyCity(a));
 
     for (const addr of finalAddresses) {
       try {
@@ -926,7 +1011,7 @@ out geom;
     }
 
     if (!buildingRings.length) {
-      setStatus('Nie znaleziono precyzyjnych dopasowań dla podanych adresów.', true);
+      setStatus('Nie znaleziono budynków dla podanych adresów.', true);
       return;
     }
 
@@ -936,7 +1021,7 @@ out geom;
     const focusBounds = tmpPoly.getBounds();
     map.setView(focusBounds.getCenter(), FIXED_ZOOM, { animate: true });
 
-    setStatus(`Zaznaczono ${buildingRings.length} budynków (${addresses.length} adresów).`);
+    setStatus(`Budynki: ${buildingRings.length} (${addresses.length} adresów).`);
   }
 
   btnShow.addEventListener('click', async () => {
@@ -955,9 +1040,9 @@ out geom;
   const HTML2CANVAS_SCALE = 3;
 
   async function saveFramePng() {
-    if (!frameVisible) { setStatus('Najpierw włącz ramkę kopiowania.', true); return; }
+    if (!frameVisible) { setStatus('Najpierw włącz ramkę.', true); return; }
     try {
-      setStatus('Generuję obraz wysokiej rozdzielczości…');
+      setStatus('Generuję PNG…');
       const fullCanvas = await html2canvas(mapContainer, { useCORS: true, logging: false, scale: HTML2CANVAS_SCALE });
 
       const frameRect = cropFrame.getBoundingClientRect();
@@ -997,7 +1082,7 @@ out geom;
 
       setStatus('Zapisano PNG.');
     } catch (err) {
-      setStatus('Błąd tworzenia PNG. Użyj ręcznego zrzutu jako fallback.', true);
+      setStatus('Błąd tworzenia PNG (fallback: ręczny zrzut).', true);
     }
   }
 
