@@ -53,7 +53,7 @@
   <header>
     <div id="controls">
       <span>Adresy:</span>
-      <input id="adres" type="text" value="" placeholder="np. Lodowa 54, 56" />
+      <input id="adres" type="text" value="" placeholder="np. Skalna 6, 8, 10" />
 
       <span>Kolor 1:</span>
       <input id="color-picker-1" type="color" value="#e73eea" />
@@ -111,10 +111,9 @@
   // =========================================================
   const FIXED_ZOOM = 17;
   const LOCK_ZOOM  = false;
-  const DEFAULT_CITY = 'Łódź'; // zgodnie z Twoim użyciem
+  const DEFAULT_CITY = 'Łódź';
   // =========================================================
 
-  // --- Inicjalizacja mapy ---
   const map = L.map('map', {
     minZoom: LOCK_ZOOM ? FIXED_ZOOM : 0,
     maxZoom: LOCK_ZOOM ? FIXED_ZOOM : 20
@@ -155,11 +154,13 @@
   }
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  // ✅ FIX: Nominatim częściej trafia lepiej gdy miasto jest na końcu:
+  // "Skalna 16, Łódź" zamiast "Łódź, Skalna 16"
   function qualifyCity(q) {
     const s = String(q || '').trim();
     const low = s.toLowerCase();
     if (low.includes('łódź') || low.includes('lodz') || low.includes(',')) return s;
-    return `${DEFAULT_CITY}, ${s}`;
+    return `${s}, ${DEFAULT_CITY}`;
   }
 
   // --- Wymiary 10x15 cm @300dpi ---
@@ -172,7 +173,7 @@
   const ratioWidth = TARGET_WIDTH_CM;
   const ratioHeight = TARGET_HEIGHT_CM;
 
-  // --- Ramka: detach + pozycjonowanie ---
+  // --- Ramka ---
   let frameVisible = false;
   let cropFrameIsDetached = false;
   let cropFramePrevStyles = null;
@@ -308,7 +309,7 @@
 
   // --- Highlight SVG: budynki + ulice ---
   let buildingRings = [];
-  let streetSegments = []; // tablice: [ [lat,lon], ... ]
+  let streetSegments = [];
 
   function clearHighlight() {
     buildingRings = [];
@@ -357,7 +358,7 @@
       }
     }
 
-    // ===== U L I C E (SVG -> zapis do PNG) =====
+    // ===== U L I C E =====
     if (chkStreets.checked && streetSegments.length) {
       const w = parseInt(streetWidth.value, 10) || 8;
       const op = parseFloat(streetOpacity.value) || 0.55;
@@ -392,7 +393,6 @@
 
   map.on('move zoom', updateHighlightSvg);
 
-  // --- UI: suwaki ulic ---
   function syncStreetUi() {
     streetWidthVal.textContent = streetWidth.value;
     streetOpacityVal.textContent = Number(streetOpacity.value).toFixed(2);
@@ -404,7 +404,6 @@
   chkStreets.addEventListener('change', syncStreetUi);
   syncStreetUi();
 
-  // --- pole wielokąta (approx) ---
   function polygonAreaApprox(coords) {
     let area = 0;
     for (let i = 0; i < coords.length; i++) {
@@ -415,39 +414,66 @@
     return Math.abs(area) / 2;
   }
 
-  // --- Geocoding + Overpass ---
-  async function geocode(address) {
-    const url = 'https://nominatim.openstreetmap.org/search?' +
-      new URLSearchParams({ format:'json', limit:'1', q: address, polygon_geojson: 1 });
-    const resp = await fetch(url, { headers: { 'Accept-Language': 'pl' } });
-    if (!resp.ok) throw new Error('Błąd geokodowania');
-    const data = await resp.json();
-    if (!data.length) return null;
-    return [parseFloat(data[0].lat), parseFloat(data[0].lon), data[0]];
+  // =========================================================
+  //  FETCH WITH RETRY (Nominatim + Overpass)
+  // =========================================================
+  async function fetchWithRetry(url, options = {}, tries = 3, baseDelay = 450) {
+    let lastErr = null;
+    for (let i = 0; i < tries; i++) {
+      try {
+        const resp = await fetch(url, options);
+
+        // 429 / 5xx → retry
+        if (resp.status === 429 || (resp.status >= 500 && resp.status <= 599)) {
+          const wait = baseDelay * Math.pow(1.8, i);
+          await sleep(wait);
+          continue;
+        }
+
+        if (!resp.ok) {
+          const err = new Error(`HTTP ${resp.status}`);
+          err.status = resp.status;
+          throw err;
+        }
+
+        return resp;
+      } catch (e) {
+        lastErr = e;
+        const wait = baseDelay * Math.pow(1.8, i);
+        await sleep(wait);
+      }
+    }
+    throw lastErr || new Error('fetchWithRetry failed');
   }
 
-  async function fetchBuildingWays(lat, lon, radius = 60) {
-    const query = `
-[out:json][timeout:25];
-(
-  way["building"](around:${radius},${lat},${lon});
-  relation["building"](around:${radius},${lat},${lon});
-);
-(._;>;);
-out body;
-`;
-    const resp = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
-    if (!resp.ok) throw new Error('Błąd Overpass');
-    const data = await resp.json();
-    return data.elements || [];
-  }
-
+  // --- NORMALIZE ---
   function normalize(s='') {
     return String(s).trim().toLowerCase()
       .replace(/\./g,'')
       .replace(/\b(ulica|ul|al|aleja|al\.)\b/g,'')
       .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[,\-–—]/g,' ')          // ✅ FIX: usuń przecinki/myślniki z porównań
       .replace(/\s+/g,' ').trim();
+  }
+
+  // "Ulica 123" -> "Ulica"
+  function extractStreet(s) {
+    const m = String(s).trim().match(/^(.+?)\s+\d/);
+    return m ? m[1].trim() : null;
+  }
+
+  // ✅ FIX: wyciągnij segment, który zawiera numer (żeby "Skalna 16, Łódź" nie psuło wanted.street)
+  function pickAddressSegmentWithNumber(addr) {
+    const parts = String(addr || '').split(',').map(s => s.trim()).filter(Boolean);
+    const hasDigit = (x) => /\d/.test(x);
+    return parts.find(hasDigit) || parts[0] || String(addr || '').trim();
+  }
+
+  function wantedFromQuery(addr) {
+    const seg = pickAddressSegmentWithNumber(addr);
+    const m = seg.match(/(.*)\s+(\d+[A-Za-z0-9\-\/]*)$/);
+    if (!m) return { street: '', number: '' };
+    return { street: normalize(m[1]), number: normalize(m[2]) };
   }
 
   function pointInRing(lon, lat, ring) {
@@ -462,14 +488,59 @@ out body;
     return inside;
   }
 
-  // "Ulica 123" -> "Ulica"
-  function extractStreet(s) {
-    const m = String(s).trim().match(/^(.+?)\s+\d/);
-    return m ? m[1].trim() : null;
+  // =========================================================
+  //  GEOCODE (Nominatim) – ✅ FIX: limit=5 + addressdetails + lepszy wybór
+  // =========================================================
+  async function geocode(address) {
+    const url = 'https://nominatim.openstreetmap.org/search?' + new URLSearchParams({
+      format: 'json',
+      limit: '5',
+      q: address,
+      polygon_geojson: '1',
+      addressdetails: '1',
+      countrycodes: 'pl'
+    });
+
+    const resp = await fetchWithRetry(url, {
+      headers: { 'Accept-Language': 'pl', 'Accept': 'application/json' }
+    }, 3, 550);
+
+    const data = await resp.json();
+    if (!data.length) return null;
+
+    const pick =
+      data.find(x => x.class === 'building' || x.type === 'house') ||
+      data.find(x => x.osm_type === 'way' || x.osm_type === 'relation') ||
+      data[0];
+
+    return [parseFloat(pick.lat), parseFloat(pick.lon), pick];
   }
 
   // =========================================================
-  //  U L I C E (zakres od-do / cała ulica)
+  //  OVERPASS – budynki
+  // =========================================================
+  async function fetchBuildingWays(lat, lon, radius = 120) { // ✅ FIX: promień większy (było 60)
+    const query = `
+[out:json][timeout:40];
+(
+  way["building"](around:${radius},${lat},${lon});
+  relation["building"](around:${radius},${lat},${lon});
+);
+(._;>;);
+out body;
+`;
+    const resp = await fetchWithRetry(
+      'https://overpass-api.de/api/interpreter',
+      { method: 'POST', body: query },
+      3,
+      650
+    );
+    const data = await resp.json();
+    return data.elements || [];
+  }
+
+  // =========================================================
+  //  U L I C E (jak było) — bez zmian istotnych dla budynków
   // =========================================================
   function opEscape(s) {
     return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -490,19 +561,20 @@ out body;
 );
 out geom;
 `;
-    const resp = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: query });
-    if (!resp.ok) throw new Error('Błąd Overpass (ulice)');
+    const resp = await fetchWithRetry(
+      'https://overpass-api.de/api/interpreter',
+      { method: 'POST', body: query },
+      3,
+      650
+    );
     const data = await resp.json();
     return (data.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 2);
   }
 
-  // zakresy + sama ulica
   function parseStreetRanges(raw) {
     const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
     const out = [];
-
     for (const p of parts) {
-      // zakres: "Ulica 1-77" / "Ulica 1 do 77"
       const m = p.match(/^(.*?)(\d+[A-Za-z0-9\/\-]*)\s*(?:-|–|—|\bdo\b)\s*(\d+[A-Za-z0-9\/\-]*)\s*$/i);
       if (m) {
         const street = m[1].trim();
@@ -511,18 +583,12 @@ out geom;
         if (street && from && to) out.push({ mode:'range', street, from, to, raw: p });
         continue;
       }
-
-      // sama ulica: "Halna" / "ul. Halna"
       const streetOnly = p.replace(/^\s*(ulica|ul\.?)\s+/i, '').trim();
-      if (streetOnly && !/\d/.test(streetOnly)) {
-        out.push({ mode:'full', street: streetOnly, raw: p });
-      }
+      if (streetOnly && !/\d/.test(streetOnly)) out.push({ mode:'full', street: streetOnly, raw: p });
     }
-
     return out;
   }
 
-  // haversine
   function distMeters(a, b) {
     const R = 6371000;
     const toRad = (d) => d * Math.PI / 180;
@@ -535,7 +601,6 @@ out geom;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
   }
 
-  // projekcja punktu na odcinek (aproksymacja equirect)
   function projectPointToSegment(P, A, B) {
     const R = 6371000;
     const lat0 = (A.lat + B.lat + P.lat) / 3 * Math.PI/180;
@@ -639,7 +704,6 @@ out geom;
     return path;
   }
 
-  // fallback numerów: jeśli np. "77" nie istnieje -> cofamy (76..71..)
   function splitHouseNo(h) {
     const m = String(h).trim().match(/^(\d+)(.*)$/);
     if (!m) return null;
@@ -695,11 +759,9 @@ out geom;
   async function highlightOneStreetRange(range, requestId) {
     const street = range.street;
 
-    // od: próbujemy normalnie, a jak brak -> można iść w górę trochę
     const r1 = await geocodeWithFallback(street, range.from, false, 15);
     if (requestId !== lastStreetRequestId) return null;
 
-    // do: jak brak -> cofamy w dół (np. 77 -> 71)
     const r2 = await geocodeWithFallback(street, range.to, true, 40);
     if (requestId !== lastStreetRequestId) return null;
 
@@ -715,7 +777,6 @@ out geom;
     if (requestId !== lastStreetRequestId) return null;
     if (!ways.length) return { ok:false, reason:`Brak geometrii OSM dla: ${street}` };
 
-    // graf
     const adj = new Map();
     const coordsByKey = new Map();
 
@@ -840,6 +901,7 @@ out geom;
 
       } catch (e) {
         fail++;
+        console.warn('Street error:', r, e);
       }
 
       await sleep(180);
@@ -858,7 +920,7 @@ out geom;
   uliceInput.addEventListener('keydown', e => { if (e.key === 'Enter') showStreetsRanges(); });
 
   // =========================================================
-  //  B U D Y N K I – jak było
+  //  B U D Y N K I
   // =========================================================
   let lastRequestId = 0;
 
@@ -896,16 +958,19 @@ out geom;
     }
 
     const finalAddresses = addresses.map(a => qualifyCity(a));
+    let okCount = 0, failCount = 0;
 
-    for (const addr of finalAddresses) {
+    for (let i = 0; i < finalAddresses.length; i++) {
+      const addr = finalAddresses[i];
+
       try {
         const geo = await geocode(addr);
-        if (!geo) { continue; }
+        if (!geo) { failCount++; continue; }
         const center = [geo[0], geo[1]];
         const nomiObj = geo[2];
         if (myId !== lastRequestId) return;
 
-        // --- Nominatim polygon tylko gdy NIE jest to Bartoka 1 ---
+        // --- Nominatim polygon (jeśli jest)
         let usedFromNominatim = false;
         if (nomiObj && nomiObj.geojson && !/bartoka\s+1\b/i.test(addr)) {
           const g = nomiObj.geojson;
@@ -921,15 +986,17 @@ out geom;
             usedFromNominatim = true;
           }
           if (usedFromNominatim) {
+            okCount++;
             if (myId !== lastRequestId) return;
+            await sleep(350); // ✅ FIX: rate limit
             continue;
           }
         }
 
         // --- Overpass ---
-        const elems = await fetchBuildingWays(center[0], center[1], 60);
+        const elems = await fetchBuildingWays(center[0], center[1], 120);
         if (myId !== lastRequestId) return;
-        if (!elems.length) { continue; }
+        if (!elems.length) { failCount++; await sleep(350); continue; }
 
         const nodeMap = new Map();
         for (const el of elems) if (el.type === 'node') nodeMap.set(el.id, [el.lat, el.lon]);
@@ -938,9 +1005,7 @@ out geom;
         const ways = elems.filter(el => el.type === 'way');
         for (const w of ways) {
           const coords = w.nodes.map(id => nodeMap.get(id)).filter(Boolean);
-          if (coords.length >= 3) {
-            rings.push({ coords, tags: w.tags || {}, area: polygonAreaApprox(coords) });
-          }
+          if (coords.length >= 3) rings.push({ coords, tags: w.tags || {}, area: polygonAreaApprox(coords) });
         }
 
         const relations = elems.filter(el => el.type === 'relation' && el.tags && (el.tags.type === 'multipolygon' || el.tags.building));
@@ -951,17 +1016,14 @@ out geom;
             const way = elems.find(e => e.type === 'way' && e.id === m.ref);
             if (!way) continue;
             const coords = way.nodes.map(id => nodeMap.get(id)).filter(Boolean);
-            if (coords.length >= 3) {
-              rings.push({ coords, tags: way.tags || {}, area: polygonAreaApprox(coords) });
-            }
+            if (coords.length >= 3) rings.push({ coords, tags: way.tags || {}, area: polygonAreaApprox(coords) });
           }
         }
 
-        if (rings.length === 0) { continue; }
+        if (rings.length === 0) { failCount++; await sleep(350); continue; }
 
-        const m = addr.match(/(.*)\s+(\d+[a-zA-Z0-9\-\/]*)$/);
-        const wanted = {};
-        if (m) { wanted.street = normalize(m[1]); wanted.number = normalize(m[2]); }
+        // ✅ FIX: wanted.street/number licz z segmentu z numerem, nie z "…, Łódź"
+        const wanted = wantedFromQuery(addr);
 
         const matches = [];
         for (const r of rings) {
@@ -971,13 +1033,20 @@ out geom;
           if (tags['addr:housenumber'] || tags['addr:street']) {
             const tagNum = normalize(tags['addr:housenumber'] || '');
             const tagStreet = normalize(tags['addr:street'] || tags['addr:street:name'] || '');
-            if (wanted.number && wanted.street && tagNum === wanted.number && tagStreet === wanted.street) {
-              accept = true;
-            }
+
+            // ✅ FIX: dopuszczamy "zawiera" w obie strony (czasem tagi mają dodatki)
+            const streetOk =
+              (!wanted.street || !tagStreet) ? true :
+              (tagStreet === wanted.street || tagStreet.includes(wanted.street) || wanted.street.includes(tagStreet));
+
+            if (wanted.number && tagNum === wanted.number && streetOk) accept = true;
           }
+
           if (!accept) {
+            // fallback: punkt w wielokącie
             if (pointInRing(center[1], center[0], r.coords)) accept = true;
           }
+
           if (accept) matches.push(r);
         }
 
@@ -992,6 +1061,7 @@ out geom;
             finalPicked = matches.map(r => r.coords);
           }
         } else {
+          // najbliższy wielokąt (fallback)
           const wayInfos = rings.map(rr => {
             const coords = rr.coords;
             let sumLat=0,sumLon=0;
@@ -1005,9 +1075,14 @@ out geom;
 
         for (const p of finalPicked) buildingRings.push(p);
 
+        okCount++;
       } catch (err) {
-        // cicho
+        failCount++;
+        console.warn('Adres nie przeszedł:', addr, err);
       }
+
+      // ✅ FIX: spowolnij serię (Nominatim/Overpass tego potrzebują)
+      await sleep(350);
     }
 
     if (!buildingRings.length) {
@@ -1021,7 +1096,7 @@ out geom;
     const focusBounds = tmpPoly.getBounds();
     map.setView(focusBounds.getCenter(), FIXED_ZOOM, { animate: true });
 
-    setStatus(`Budynki: ${buildingRings.length} (${addresses.length} adresów).`);
+    setStatus(`Budynki: ${buildingRings.length} (OK: ${okCount}, błędy: ${failCount}).`);
   }
 
   btnShow.addEventListener('click', async () => {
@@ -1082,6 +1157,7 @@ out geom;
 
       setStatus('Zapisano PNG.');
     } catch (err) {
+      console.warn(err);
       setStatus('Błąd tworzenia PNG (fallback: ręczny zrzut).', true);
     }
   }
