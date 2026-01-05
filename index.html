@@ -503,7 +503,7 @@
 
     const resp = await fetchWithRetry(url, {
       headers: { 'Accept-Language': 'pl', 'Accept': 'application/json' }
-    }, 3, 550);
+    }, 5, 900);
 
     const data = await resp.json();
     if (!data.length) return null;
@@ -988,7 +988,7 @@ out geom;
           if (usedFromNominatim) {
             okCount++;
             if (myId !== lastRequestId) return;
-            await sleep(350); // ✅ FIX: rate limit
+            await sleep(1400); // ✅ FIX: rate limit
             continue;
           }
         }
