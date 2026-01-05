@@ -114,6 +114,7 @@
   const DEFAULT_CITY = 'Łódź';
   // =========================================================
 
+  // --- Inicjalizacja mapy ---
   const map = L.map('map', {
     minZoom: LOCK_ZOOM ? FIXED_ZOOM : 0,
     maxZoom: LOCK_ZOOM ? FIXED_ZOOM : 20
@@ -154,8 +155,7 @@
   }
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // ✅ FIX: Nominatim częściej trafia lepiej gdy miasto jest na końcu:
-  // "Skalna 16, Łódź" zamiast "Łódź, Skalna 16"
+  // ✅ lepsze wyniki: "Skalna 16, Łódź"
   function qualifyCity(q) {
     const s = String(q || '').trim();
     const low = s.toLowerCase();
@@ -173,7 +173,7 @@
   const ratioWidth = TARGET_WIDTH_CM;
   const ratioHeight = TARGET_HEIGHT_CM;
 
-  // --- Ramka ---
+  // --- Ramka: detach + pozycjonowanie ---
   let frameVisible = false;
   let cropFrameIsDetached = false;
   let cropFramePrevStyles = null;
@@ -309,7 +309,7 @@
 
   // --- Highlight SVG: budynki + ulice ---
   let buildingRings = [];
-  let streetSegments = [];
+  let streetSegments = []; // tablice: [ [lat,lon], ... ]
 
   function clearHighlight() {
     buildingRings = [];
@@ -358,7 +358,7 @@
       }
     }
 
-    // ===== U L I C E =====
+    // ===== U L I C E (SVG -> zapis do PNG) =====
     if (chkStreets.checked && streetSegments.length) {
       const w = parseInt(streetWidth.value, 10) || 8;
       const op = parseFloat(streetOpacity.value) || 0.55;
@@ -393,6 +393,7 @@
 
   map.on('move zoom', updateHighlightSvg);
 
+  // --- UI: suwaki ulic ---
   function syncStreetUi() {
     streetWidthVal.textContent = streetWidth.value;
     streetOpacityVal.textContent = Number(streetOpacity.value).toFixed(2);
@@ -404,6 +405,7 @@
   chkStreets.addEventListener('change', syncStreetUi);
   syncStreetUi();
 
+  // --- pole wielokąta (approx) ---
   function polygonAreaApprox(coords) {
     let area = 0;
     for (let i = 0; i < coords.length; i++) {
@@ -415,15 +417,14 @@
   }
 
   // =========================================================
-  //  FETCH WITH RETRY (Nominatim + Overpass)
+  //  FETCH WITH RETRY (Nominatim + Overpass) — ważne na 429
   // =========================================================
-  async function fetchWithRetry(url, options = {}, tries = 3, baseDelay = 450) {
+  async function fetchWithRetry(url, options = {}, tries = 5, baseDelay = 900) {
     let lastErr = null;
     for (let i = 0; i < tries; i++) {
       try {
         const resp = await fetch(url, options);
 
-        // 429 / 5xx → retry
         if (resp.status === 429 || (resp.status >= 500 && resp.status <= 599)) {
           const wait = baseDelay * Math.pow(1.8, i);
           await sleep(wait);
@@ -446,34 +447,43 @@
     throw lastErr || new Error('fetchWithRetry failed');
   }
 
-  // --- NORMALIZE ---
+  // --- Normalizacja ulicy (do porównań) ---
   function normalize(s='') {
     return String(s).trim().toLowerCase()
       .replace(/\./g,'')
       .replace(/\b(ulica|ul|al|aleja|al\.)\b/g,'')
       .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-      .replace(/[,\-–—]/g,' ')          // ✅ FIX: usuń przecinki/myślniki z porównań
+      .replace(/[,\-–—]/g,' ')
       .replace(/\s+/g,' ').trim();
   }
 
-  // "Ulica 123" -> "Ulica"
-  function extractStreet(s) {
-    const m = String(s).trim().match(/^(.+?)\s+\d/);
-    return m ? m[1].trim() : null;
-  }
+  // ✅ KLUCZ: dopasowanie numerów typu "20-22", "20;22", "20,22"
+  function housenumberMatches(tagNumRaw, wantedNumRaw) {
+    const tag0 = String(tagNumRaw || '').trim().toLowerCase();
+    const want0 = String(wantedNumRaw || '').trim().toLowerCase();
+    if (!tag0 || !want0) return false;
 
-  // ✅ FIX: wyciągnij segment, który zawiera numer (żeby "Skalna 16, Łódź" nie psuło wanted.street)
-  function pickAddressSegmentWithNumber(addr) {
-    const parts = String(addr || '').split(',').map(s => s.trim()).filter(Boolean);
-    const hasDigit = (x) => /\d/.test(x);
-    return parts.find(hasDigit) || parts[0] || String(addr || '').trim();
-  }
+    const tag = tag0.replace(/\s+/g,'').replace(/[,/]/g,';'); // ujednolicenie separatorów
+    const want = want0.replace(/\s+/g,'');
 
-  function wantedFromQuery(addr) {
-    const seg = pickAddressSegmentWithNumber(addr);
-    const m = seg.match(/(.*)\s+(\d+[A-Za-z0-9\-\/]*)$/);
-    if (!m) return { street: '', number: '' };
-    return { street: normalize(m[1]), number: normalize(m[2]) };
+    if (tag === want) return true;
+
+    // lista: "20;22;24"
+    const parts = tag.split(';').filter(Boolean);
+    if (parts.includes(want)) return true;
+
+    // zakres: "20-22" / "20–22"
+    const m = tag.match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+    if (m && /^\d+$/.test(want)) {
+      const a = parseInt(m[1], 10), b = parseInt(m[2], 10), x = parseInt(want, 10);
+      const lo = Math.min(a,b), hi = Math.max(a,b);
+      return x >= lo && x <= hi;
+    }
+
+    // czasem tag wygląda np. "20-22a" — to przynajmniej "startsWith"
+    if (tag.startsWith(want)) return true;
+
+    return false;
   }
 
   function pointInRing(lon, lat, ring) {
@@ -488,23 +498,38 @@
     return inside;
   }
 
-  // =========================================================
-  //  GEOCODE (Nominatim) – ✅ FIX: limit=5 + addressdetails + lepszy wybór
-  // =========================================================
+  // "Ulica 123" -> "Ulica"
+  function extractStreet(s) {
+    const m = String(s).trim().match(/^(.+?)\s+\d/);
+    return m ? m[1].trim() : null;
+  }
+
+  // ✅ adres może mieć ", Łódź" — bierz segment z numerem
+  function pickAddressSegmentWithNumber(addr) {
+    const parts = String(addr || '').split(',').map(s => s.trim()).filter(Boolean);
+    const hasDigit = (x) => /\d/.test(x);
+    return parts.find(hasDigit) || parts[0] || String(addr || '').trim();
+  }
+
+  function wantedFromQuery(addr) {
+    const seg = pickAddressSegmentWithNumber(addr);
+    const m = seg.match(/(.*)\s+(\d+[A-Za-z0-9\-\/]*)$/);
+    if (!m) return { street: '', number: '' };
+    return { street: normalize(m[1]), number: String(m[2]).trim() };
+  }
+
+  // --- Geocoding + Overpass ---
   async function geocode(address) {
     const url = 'https://nominatim.openstreetmap.org/search?' + new URLSearchParams({
-      format: 'json',
-      limit: '5',
+      format:'json',
+      limit:'5',
       q: address,
-      polygon_geojson: '1',
-      addressdetails: '1',
+      polygon_geojson: 1,
+      addressdetails: 1,
       countrycodes: 'pl'
     });
 
-    const resp = await fetchWithRetry(url, {
-      headers: { 'Accept-Language': 'pl', 'Accept': 'application/json' }
-    }, 5, 900);
-
+    const resp = await fetchWithRetry(url, { headers: { 'Accept-Language': 'pl', 'Accept': 'application/json' } }, 5, 900);
     const data = await resp.json();
     if (!data.length) return null;
 
@@ -516,10 +541,7 @@
     return [parseFloat(pick.lat), parseFloat(pick.lon), pick];
   }
 
-  // =========================================================
-  //  OVERPASS – budynki
-  // =========================================================
-  async function fetchBuildingWays(lat, lon, radius = 120) { // ✅ FIX: promień większy (było 60)
+  async function fetchBuildingWays(lat, lon, radius = 140) {
     const query = `
 [out:json][timeout:40];
 (
@@ -529,18 +551,13 @@
 (._;>;);
 out body;
 `;
-    const resp = await fetchWithRetry(
-      'https://overpass-api.de/api/interpreter',
-      { method: 'POST', body: query },
-      3,
-      650
-    );
+    const resp = await fetchWithRetry('https://overpass-api.de/api/interpreter', { method: 'POST', body: query }, 5, 900);
     const data = await resp.json();
     return data.elements || [];
   }
 
   // =========================================================
-  //  U L I C E (jak było) — bez zmian istotnych dla budynków
+  //  U L I C E (zakres od-do / cała ulica)
   // =========================================================
   function opEscape(s) {
     return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -561,19 +578,16 @@ out body;
 );
 out geom;
 `;
-    const resp = await fetchWithRetry(
-      'https://overpass-api.de/api/interpreter',
-      { method: 'POST', body: query },
-      3,
-      650
-    );
+    const resp = await fetchWithRetry('https://overpass-api.de/api/interpreter', { method: 'POST', body: query }, 5, 900);
     const data = await resp.json();
     return (data.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 2);
   }
 
+  // zakresy + sama ulica
   function parseStreetRanges(raw) {
     const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
     const out = [];
+
     for (const p of parts) {
       const m = p.match(/^(.*?)(\d+[A-Za-z0-9\/\-]*)\s*(?:-|–|—|\bdo\b)\s*(\d+[A-Za-z0-9\/\-]*)\s*$/i);
       if (m) {
@@ -583,12 +597,17 @@ out geom;
         if (street && from && to) out.push({ mode:'range', street, from, to, raw: p });
         continue;
       }
+
       const streetOnly = p.replace(/^\s*(ulica|ul\.?)\s+/i, '').trim();
-      if (streetOnly && !/\d/.test(streetOnly)) out.push({ mode:'full', street: streetOnly, raw: p });
+      if (streetOnly && !/\d/.test(streetOnly)) {
+        out.push({ mode:'full', street: streetOnly, raw: p });
+      }
     }
+
     return out;
   }
 
+  // haversine
   function distMeters(a, b) {
     const R = 6371000;
     const toRad = (d) => d * Math.PI / 180;
@@ -601,6 +620,7 @@ out geom;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
   }
 
+  // projekcja punktu na odcinek (aproksymacja equirect)
   function projectPointToSegment(P, A, B) {
     const R = 6371000;
     const lat0 = (A.lat + B.lat + P.lat) / 3 * Math.PI/180;
@@ -777,6 +797,7 @@ out geom;
     if (requestId !== lastStreetRequestId) return null;
     if (!ways.length) return { ok:false, reason:`Brak geometrii OSM dla: ${street}` };
 
+    // graf
     const adj = new Map();
     const coordsByKey = new Map();
 
@@ -901,10 +922,9 @@ out geom;
 
       } catch (e) {
         fail++;
-        console.warn('Street error:', r, e);
       }
 
-      await sleep(180);
+      await sleep(200);
     }
 
     if (!drawn) { setStatus('Nie udało się narysować żadnego zakresu/ulicy.', true); return; }
@@ -958,19 +978,18 @@ out geom;
     }
 
     const finalAddresses = addresses.map(a => qualifyCity(a));
+
     let okCount = 0, failCount = 0;
 
-    for (let i = 0; i < finalAddresses.length; i++) {
-      const addr = finalAddresses[i];
-
+    for (const addr of finalAddresses) {
       try {
         const geo = await geocode(addr);
-        if (!geo) { failCount++; continue; }
+        if (!geo) { failCount++; await sleep(300); continue; }
         const center = [geo[0], geo[1]];
         const nomiObj = geo[2];
         if (myId !== lastRequestId) return;
 
-        // --- Nominatim polygon (jeśli jest)
+        // --- Nominatim polygon (jeśli jest) ---
         let usedFromNominatim = false;
         if (nomiObj && nomiObj.geojson && !/bartoka\s+1\b/i.test(addr)) {
           const g = nomiObj.geojson;
@@ -988,15 +1007,15 @@ out geom;
           if (usedFromNominatim) {
             okCount++;
             if (myId !== lastRequestId) return;
-            await sleep(1400); // ✅ FIX: rate limit
+            await sleep(1200);
             continue;
           }
         }
 
         // --- Overpass ---
-        const elems = await fetchBuildingWays(center[0], center[1], 120);
+        const elems = await fetchBuildingWays(center[0], center[1], 140);
         if (myId !== lastRequestId) return;
-        if (!elems.length) { failCount++; await sleep(350); continue; }
+        if (!elems.length) { failCount++; await sleep(1200); continue; }
 
         const nodeMap = new Map();
         for (const el of elems) if (el.type === 'node') nodeMap.set(el.id, [el.lat, el.lon]);
@@ -1005,7 +1024,9 @@ out geom;
         const ways = elems.filter(el => el.type === 'way');
         for (const w of ways) {
           const coords = w.nodes.map(id => nodeMap.get(id)).filter(Boolean);
-          if (coords.length >= 3) rings.push({ coords, tags: w.tags || {}, area: polygonAreaApprox(coords) });
+          if (coords.length >= 3) {
+            rings.push({ coords, tags: w.tags || {}, area: polygonAreaApprox(coords) });
+          }
         }
 
         const relations = elems.filter(el => el.type === 'relation' && el.tags && (el.tags.type === 'multipolygon' || el.tags.building));
@@ -1016,13 +1037,14 @@ out geom;
             const way = elems.find(e => e.type === 'way' && e.id === m.ref);
             if (!way) continue;
             const coords = way.nodes.map(id => nodeMap.get(id)).filter(Boolean);
-            if (coords.length >= 3) rings.push({ coords, tags: way.tags || {}, area: polygonAreaApprox(coords) });
+            if (coords.length >= 3) {
+              rings.push({ coords, tags: way.tags || {}, area: polygonAreaApprox(coords) });
+            }
           }
         }
 
-        if (rings.length === 0) { failCount++; await sleep(350); continue; }
+        if (rings.length === 0) { failCount++; await sleep(1200); continue; }
 
-        // ✅ FIX: wanted.street/number licz z segmentu z numerem, nie z "…, Łódź"
         const wanted = wantedFromQuery(addr);
 
         const matches = [];
@@ -1030,20 +1052,20 @@ out geom;
           const tags = r.tags || {};
           let accept = false;
 
-          if (tags['addr:housenumber'] || tags['addr:street']) {
-            const tagNum = normalize(tags['addr:housenumber'] || '');
-            const tagStreet = normalize(tags['addr:street'] || tags['addr:street:name'] || '');
+          const tagStreet = normalize(tags['addr:street'] || tags['addr:street:name'] || '');
+          const tagNumRaw = (tags['addr:housenumber'] || '').toString();
 
-            // ✅ FIX: dopuszczamy "zawiera" w obie strony (czasem tagi mają dodatki)
-            const streetOk =
-              (!wanted.street || !tagStreet) ? true :
-              (tagStreet === wanted.street || tagStreet.includes(wanted.street) || wanted.street.includes(tagStreet));
+          const streetOk =
+            (!wanted.street || !tagStreet) ? true :
+            (tagStreet === wanted.street || tagStreet.includes(wanted.street) || wanted.street.includes(tagStreet));
 
-            if (wanted.number && tagNum === wanted.number && streetOk) accept = true;
+          // ✅ FIX: numer może być "20-22" / "20;22" -> dopasuj
+          if (!accept && wanted.number && tagNumRaw && housenumberMatches(tagNumRaw, wanted.number) && streetOk) {
+            accept = true;
           }
 
+          // fallback: punkt w obrysie
           if (!accept) {
-            // fallback: punkt w wielokącie
             if (pointInRing(center[1], center[0], r.coords)) accept = true;
           }
 
@@ -1053,7 +1075,7 @@ out geom;
         let finalPicked = [];
 
         if (matches.length) {
-          if (wanted.street === 'bartoka' && wanted.number === '1') {
+          if (wanted.street === 'bartoka' && normalize(wanted.number) === '1') {
             let largest = matches[0];
             for (const r of matches) if (r.area > largest.area) largest = r;
             finalPicked = [largest.coords];
@@ -1061,7 +1083,7 @@ out geom;
             finalPicked = matches.map(r => r.coords);
           }
         } else {
-          // najbliższy wielokąt (fallback)
+          // fallback: najbliższy wielokąt
           const wayInfos = rings.map(rr => {
             const coords = rr.coords;
             let sumLat=0,sumLon=0;
@@ -1078,11 +1100,10 @@ out geom;
         okCount++;
       } catch (err) {
         failCount++;
-        console.warn('Adres nie przeszedł:', addr, err);
       }
 
-      // ✅ FIX: spowolnij serię (Nominatim/Overpass tego potrzebują)
-      await sleep(350);
+      // ✅ ważne: nie bombarduj Nominatim/Overpass
+      await sleep(1200);
     }
 
     if (!buildingRings.length) {
@@ -1157,7 +1178,6 @@ out geom;
 
       setStatus('Zapisano PNG.');
     } catch (err) {
-      console.warn(err);
       setStatus('Błąd tworzenia PNG (fallback: ręczny zrzut).', true);
     }
   }
