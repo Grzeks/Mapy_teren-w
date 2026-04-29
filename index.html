@@ -72,7 +72,7 @@
       <div class="flex-break"></div>
 
       <span>Ulice:</span>
-      <input id="ulice" type="text" value="" placeholder="np. Halna 1-77, Halna" />
+      <input id="ulice" type="text" value="" placeholder="np. Pomorska od Kasprowy Wierch do Arniki" />
       <button id="btn-streets">Pokaż ulice</button>
 
       <label class="inline">
@@ -112,6 +112,7 @@
   const FIXED_ZOOM = 17;
   const LOCK_ZOOM  = false;
   const DEFAULT_CITY = 'Łódź';
+  const DEFAULT_CITY_BBOX = { south: 51.68, west: 19.30, north: 51.86, east: 19.72 };
   // =========================================================
 
   // --- Inicjalizacja mapy ---
@@ -432,7 +433,11 @@
         }
 
         if (!resp.ok) {
-          const err = new Error(`HTTP ${resp.status}`);
+          let detail = '';
+          try {
+            detail = (await resp.text()).replace(/\s+/g, ' ').slice(0, 240);
+          } catch (_) {}
+          const err = new Error(`HTTP ${resp.status}${detail ? `: ${detail}` : ''}`);
           err.status = resp.status;
           throw err;
         }
@@ -551,7 +556,7 @@
 (._;>;);
 out body;
 `;
-    const resp = await fetchWithRetry('https://overpass-api.de/api/interpreter', { method: 'POST', body: query }, 5, 900);
+    const resp = await fetchOverpass(query);
     const data = await resp.json();
     return data.elements || [];
   }
@@ -561,6 +566,28 @@ out body;
   // =========================================================
   function opEscape(s) {
     return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+  async function fetchOverpass(query) {
+    const endpoints = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.openstreetmap.ru/api/interpreter'
+    ];
+    let lastErr = null;
+
+    for (const endpoint of endpoints) {
+      try {
+        const url = endpoint + '?' + new URLSearchParams({ data: query });
+        return await fetchWithRetry(url, { headers: { 'Accept': 'application/json' } }, 3, 700);
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw lastErr || new Error('Overpass error');
+  }
+  function opRegexEscape(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
   function boundsToBboxObj(bounds) {
     const sw = bounds.getSouthWest();
@@ -578,27 +605,92 @@ out body;
 );
 out geom;
 `;
-    const resp = await fetchWithRetry('https://overpass-api.de/api/interpreter', { method: 'POST', body: query }, 5, 900);
+    const resp = await fetchOverpass(query);
     const data = await resp.json();
     return (data.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 2);
   }
 
-  // zakresy + sama ulica
+  async function fetchHighwayWaysByNamesBBox(streetNames, bbox) {
+    const { south, west, north, east } = bbox;
+    const names = streetNames.flatMap(expandStreetNameAliases).filter(Boolean);
+    const re = `^(${names.map(opRegexEscape).join('|')})$`;
+    const query = `
+[out:json][timeout:30];
+(
+  way["highway"]["name"~"${re}"](${south},${west},${north},${east});
+);
+out geom;
+`;
+    const resp = await fetchOverpass(query);
+    const data = await resp.json();
+    return (data.elements || []).filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 2);
+  }
+
+  async function fetchHighwayWaysByNamesCity(streetNames) {
+    return fetchHighwayWaysByNamesBBox(streetNames, DEFAULT_CITY_BBOX);
+  }
+
+  function stripStreetPrefix(s) {
+    return String(s || '').replace(/^\s*(ulica|ul\.?|aleja|al\.?)\s+/i, '').trim();
+  }
+
+  function expandStreetNameAliases(streetName) {
+    const clean = stripStreetPrefix(streetName);
+    const names = [clean];
+    const withoutParen = clean.replace(/\s*\([^)]*\)\s*/g, '').trim();
+    const withParenText = clean.replace(/\(([^)]*)\)/g, '$1').trim();
+    if (withoutParen && withoutParen !== clean) names.push(withoutParen);
+    if (withParenText && withParenText !== clean) names.push(withParenText);
+
+    const polishEnding = clean.match(/^(.*)y\(a\)$/i);
+    if (polishEnding) {
+      names.push(`${polishEnding[1]}y`);
+      names.push(`${polishEnding[1]}a`);
+    }
+    if (normalize(clean) === 'hyrny') names.push('Hyrna');
+
+    return [...new Set(names.map(n => n.trim()).filter(Boolean))];
+  }
+
+  function streetNameMatches(osmName, wantedName) {
+    const osm = normalize(stripStreetPrefix(osmName || ''));
+    if (!osm) return false;
+    return expandStreetNameAliases(wantedName).some(alias => normalize(alias) === osm);
+  }
+
+  function splitStreetInputs(raw) {
+    return raw
+      .split(/[\n;]/)
+      .flatMap(line => line.split(','))
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  // zakresy, cała ulica, od skrzyżowania do skrzyżowania
   function parseStreetRanges(raw) {
-    const parts = raw.split(',').map(s => s.trim()).filter(Boolean);
+    const parts = splitStreetInputs(raw);
     const out = [];
 
     for (const p of parts) {
+      const byIntersections = p.match(/^(.+?)\s+\bod\b\s+(.+?)\s+\bdo\b\s+(.+?)\s*$/i);
+      if (byIntersections) {
+        const street = stripStreetPrefix(byIntersections[1]);
+        const fromStreet = stripStreetPrefix(byIntersections[2]);
+        const toStreet = stripStreetPrefix(byIntersections[3]);
+        if (street && fromStreet && toStreet) out.push({ mode:'intersections', street, fromStreet, toStreet, raw: p });
+        continue;
+      }
+
       const m = p.match(/^(.*?)(\d+[A-Za-z0-9\/\-]*)\s*(?:-|–|—|\bdo\b)\s*(\d+[A-Za-z0-9\/\-]*)\s*$/i);
       if (m) {
-        const street = m[1].trim();
+        const street = stripStreetPrefix(m[1]);
         const from = m[2].trim();
         const to = m[3].trim();
         if (street && from && to) out.push({ mode:'range', street, from, to, raw: p });
         continue;
       }
 
-      const streetOnly = p.replace(/^\s*(ulica|ul\.?)\s+/i, '').trim();
+      const streetOnly = stripStreetPrefix(p);
       if (streetOnly && !/\d/.test(streetOnly)) {
         out.push({ mode:'full', street: streetOnly, raw: p });
       }
@@ -750,6 +842,129 @@ out geom;
     return { geo: null, usedHouse: house, fallback: false };
   }
 
+  function buildPathOnStreetWays(ways, p1, p2, rawLabel) {
+    const adj = new Map();
+    const coordsByKey = new Map();
+
+    function ensureNode(ll) {
+      const k = toKey(ll);
+      if (!coordsByKey.has(k)) coordsByKey.set(k, ll);
+      if (!adj.has(k)) adj.set(k, []);
+      return k;
+    }
+    function addEdge(k1, k2, w) { adj.get(k1).push({ to: k2, w }); }
+
+    for (const w of ways) {
+      const pts = w.geometry.map(p => L.latLng(p.lat, p.lon));
+      for (let i = 0; i < pts.length - 1; i++) {
+        const A = pts[i], B = pts[i+1];
+        const kA = ensureNode(A);
+        const kB = ensureNode(B);
+        const wAB = distMeters(A, B);
+        addEdge(kA, kB, wAB);
+        addEdge(kB, kA, wAB);
+      }
+    }
+
+    function findBestProjection(P) {
+      let best = null;
+      for (const w of ways) {
+        const pts = w.geometry.map(p => L.latLng(p.lat, p.lon));
+        for (let i = 0; i < pts.length - 1; i++) {
+          const A = pts[i], B = pts[i+1];
+          const pr = projectPointToSegment(P, A, B);
+          if (!best || pr.d < best.d) best = { ...pr, A, B };
+        }
+      }
+      return best;
+    }
+
+    const pr1 = findBestProjection(p1);
+    const pr2 = findBestProjection(p2);
+    if (!pr1 || !pr2) return { ok:false, reason:`Nie udało się dopasować odcinka: ${rawLabel}` };
+
+    const kA1 = ensureNode(pr1.A);
+    const kB1 = ensureNode(pr1.B);
+    const kP1 = ensureNode(pr1.proj);
+
+    const kA2 = ensureNode(pr2.A);
+    const kB2 = ensureNode(pr2.B);
+    const kP2 = ensureNode(pr2.proj);
+
+    const wP1A = distMeters(pr1.proj, pr1.A), wP1B = distMeters(pr1.proj, pr1.B);
+    addEdge(kP1, kA1, wP1A); addEdge(kA1, kP1, wP1A);
+    addEdge(kP1, kB1, wP1B); addEdge(kB1, kP1, wP1B);
+
+    const wP2A = distMeters(pr2.proj, pr2.A), wP2B = distMeters(pr2.proj, pr2.B);
+    addEdge(kP2, kA2, wP2A); addEdge(kA2, kP2, wP2A);
+    addEdge(kP2, kB2, wP2B); addEdge(kB2, kP2, wP2B);
+
+    const pathKeys = dijkstra(adj, kP1, kP2);
+    if (!pathKeys || pathKeys.length < 2) return { ok:false, reason:`Brak ścieżki po ulicy: ${rawLabel}` };
+
+    const path = pathKeys.map(k => coordsByKey.get(k)).filter(Boolean).map(ll => [ll.lat, ll.lng]);
+    return { ok:true, path };
+  }
+
+  function segmentIntersectionPoint(A, B, C, D) {
+    const R = 6371000;
+    const lat0 = (A.lat + B.lat + C.lat + D.lat) / 4 * Math.PI/180;
+    const cos0 = Math.cos(lat0);
+    const toXY = (ll) => ({
+      x: (ll.lng * Math.PI/180) * R * cos0,
+      y: (ll.lat * Math.PI/180) * R
+    });
+    const toLL = (x, y) => L.latLng((y / R) * 180/Math.PI, (x / (R * cos0)) * 180/Math.PI);
+    const a = toXY(A), b = toXY(B), c = toXY(C), d = toXY(D);
+    const rx = b.x - a.x, ry = b.y - a.y;
+    const sx = d.x - c.x, sy = d.y - c.y;
+    const den = rx * sy - ry * sx;
+    if (Math.abs(den) < 1e-9) return null;
+    const qpx = c.x - a.x, qpy = c.y - a.y;
+    const t = (qpx * sy - qpy * sx) / den;
+    const u = (qpx * ry - qpy * rx) / den;
+    if (t < -0.0001 || t > 1.0001 || u < -0.0001 || u > 1.0001) return null;
+    return toLL(a.x + t * rx, a.y + t * ry);
+  }
+
+  function findStreetIntersectionPoint(mainWays, crossWays) {
+    const maxSnapMeters = 45;
+    let best = null;
+
+    for (const mw of mainWays) {
+      const mPts = mw.geometry.map(p => L.latLng(p.lat, p.lon));
+      for (let mi = 0; mi < mPts.length - 1; mi++) {
+        const A = mPts[mi], B = mPts[mi+1];
+
+        for (const cw of crossWays) {
+          const cPts = cw.geometry.map(p => L.latLng(p.lat, p.lon));
+          for (let ci = 0; ci < cPts.length - 1; ci++) {
+            const C = cPts[ci], D = cPts[ci+1];
+            const hit = segmentIntersectionPoint(A, B, C, D);
+            if (hit) return hit;
+
+            const c1 = projectPointToSegment(C, A, B);
+            const c2 = projectPointToSegment(D, A, B);
+            const c3 = projectPointToSegment(A, C, D);
+            const c4 = projectPointToSegment(B, C, D);
+            const candidates = [
+              { point: c1.proj, d: c1.d },
+              { point: c2.proj, d: c2.d },
+              { point: A, d: c3.d },
+              { point: B, d: c4.d }
+            ];
+
+            for (const cand of candidates) {
+              if (!best || cand.d < best.d) best = cand;
+            }
+          }
+        }
+      }
+    }
+
+    return best && best.d <= maxSnapMeters ? best.point : null;
+  }
+
   let lastStreetRequestId = 0;
 
   async function highlightWholeStreet(streetName, requestId) {
@@ -797,67 +1012,9 @@ out geom;
     if (requestId !== lastStreetRequestId) return null;
     if (!ways.length) return { ok:false, reason:`Brak geometrii OSM dla: ${street}` };
 
-    // graf
-    const adj = new Map();
-    const coordsByKey = new Map();
-
-    function ensureNode(ll) {
-      const k = toKey(ll);
-      if (!coordsByKey.has(k)) coordsByKey.set(k, ll);
-      if (!adj.has(k)) adj.set(k, []);
-      return k;
-    }
-    function addEdge(k1, k2, w) { adj.get(k1).push({ to: k2, w }); }
-
-    for (const w of ways) {
-      const pts = w.geometry.map(p => L.latLng(p.lat, p.lon));
-      for (let i = 0; i < pts.length - 1; i++) {
-        const A = pts[i], B = pts[i+1];
-        const kA = ensureNode(A);
-        const kB = ensureNode(B);
-        const wAB = distMeters(A, B);
-        addEdge(kA, kB, wAB);
-        addEdge(kB, kA, wAB);
-      }
-    }
-
-    function findBestProjection(P) {
-      let best = null;
-      for (const w of ways) {
-        const pts = w.geometry.map(p => L.latLng(p.lat, p.lon));
-        for (let i = 0; i < pts.length - 1; i++) {
-          const A = pts[i], B = pts[i+1];
-          const pr = projectPointToSegment(P, A, B);
-          if (!best || pr.d < best.d) best = { ...pr, A, B };
-        }
-      }
-      return best;
-    }
-
-    const pr1 = findBestProjection(p1);
-    const pr2 = findBestProjection(p2);
-    if (!pr1 || !pr2) return { ok:false, reason:`Nie udało się dopasować odcinka: ${range.raw}` };
-
-    const kA1 = ensureNode(pr1.A);
-    const kB1 = ensureNode(pr1.B);
-    const kP1 = ensureNode(pr1.proj);
-
-    const kA2 = ensureNode(pr2.A);
-    const kB2 = ensureNode(pr2.B);
-    const kP2 = ensureNode(pr2.proj);
-
-    const wP1A = distMeters(pr1.proj, pr1.A), wP1B = distMeters(pr1.proj, pr1.B);
-    addEdge(kP1, kA1, wP1A); addEdge(kA1, kP1, wP1A);
-    addEdge(kP1, kB1, wP1B); addEdge(kB1, kP1, wP1B);
-
-    const wP2A = distMeters(pr2.proj, pr2.A), wP2B = distMeters(pr2.proj, pr2.B);
-    addEdge(kP2, kA2, wP2A); addEdge(kA2, kP2, wP2A);
-    addEdge(kP2, kB2, wP2B); addEdge(kB2, kP2, wP2B);
-
-    const pathKeys = dijkstra(adj, kP1, kP2);
-    if (!pathKeys || pathKeys.length < 2) return { ok:false, reason:`Brak ścieżki po ulicy: ${range.raw}` };
-
-    const path = pathKeys.map(k => coordsByKey.get(k)).filter(Boolean).map(ll => [ll.lat, ll.lng]);
+    const built = buildPathOnStreetWays(ways, p1, p2, range.raw);
+    if (!built.ok) return built;
+    const path = built.path;
 
     streetSegments.push(path);
     updateHighlightSvg();
@@ -871,13 +1028,45 @@ out geom;
     };
   }
 
+  async function highlightStreetBetweenIntersections(range, requestId) {
+    let ways = await fetchHighwayWaysByNamesCity([range.street, range.fromStreet, range.toStreet]);
+    if (requestId !== lastStreetRequestId) return null;
+
+    if (!ways.length) {
+      const bbox = boundsToBboxObj(map.getBounds().pad(4.0));
+      ways = await fetchHighwayWaysByNamesBBox([range.street, range.fromStreet, range.toStreet], bbox);
+      if (requestId !== lastStreetRequestId) return null;
+    }
+
+    const mainWays = ways.filter(w => streetNameMatches(w.tags && w.tags.name, range.street));
+    const fromWays = ways.filter(w => streetNameMatches(w.tags && w.tags.name, range.fromStreet));
+    const toWays = ways.filter(w => streetNameMatches(w.tags && w.tags.name, range.toStreet));
+
+    if (!mainWays.length) return { ok:false, reason:`Brak ulicy głównej w OSM: ${range.street}` };
+    if (!fromWays.length) return { ok:false, reason:`Brak ulicy początkowej w OSM: ${range.fromStreet}` };
+    if (!toWays.length) return { ok:false, reason:`Brak ulicy końcowej w OSM: ${range.toStreet}` };
+
+    const p1 = findStreetIntersectionPoint(mainWays, fromWays);
+    const p2 = findStreetIntersectionPoint(mainWays, toWays);
+    if (!p1) return { ok:false, reason:`Nie znaleziono skrzyżowania: ${range.street} / ${range.fromStreet}` };
+    if (!p2) return { ok:false, reason:`Nie znaleziono skrzyżowania: ${range.street} / ${range.toStreet}` };
+
+    const built = buildPathOnStreetWays(mainWays, p1, p2, range.raw);
+    if (!built.ok) return built;
+
+    streetSegments.push(built.path);
+    updateHighlightSvg();
+
+    return { ok:true, path: built.path };
+  }
+
   async function showStreetsRanges() {
     const raw = uliceInput.value.trim();
-    if (!raw) { setStatus('Podaj ulicę: "Halna" albo zakres "Halna 1-77".', true); return; }
+    if (!raw) { setStatus('Podaj ulicę: "Halna", "Halna 1-77" albo "Pomorska od Kasprowy Wierch do Arniki".', true); return; }
 
     const ranges = parseStreetRanges(raw);
     if (!ranges.length) {
-      setStatus('Nie rozpoznano wpisu. Format: "Ulica 10-20, Inna" (bez numerów = cała ulica).', true);
+      setStatus('Nie rozpoznano wpisu. Format: "Ulica 10-20", "Ulica" albo "Ulica od Przecznica do Przecznica".', true);
       return;
     }
 
@@ -888,6 +1077,7 @@ out geom;
     setStatus(`Rysuję ulice: ${ranges.length}…`);
 
     let drawn = 0, fail = 0, fallbackCount = 0;
+    const failReasons = [];
     let merged = null;
 
     for (const r of ranges) {
@@ -905,6 +1095,7 @@ out geom;
             merged = merged ? merged.extend(b) : b;
           } else {
             fail++;
+            if (res && res.reason) failReasons.push(res.reason);
           }
         }
 
@@ -917,17 +1108,38 @@ out geom;
             merged = merged ? merged.extend(res.bounds) : res.bounds;
           } else {
             fail++;
+            if (res && res.reason) failReasons.push(res.reason);
+          }
+        }
+
+        if (r.mode === 'intersections') {
+          res = await highlightStreetBetweenIntersections(r, requestId);
+          if (requestId !== lastStreetRequestId) return;
+
+          if (res && res.ok && res.path) {
+            drawn++;
+            const b = L.latLngBounds(res.path.map(p => L.latLng(p[0], p[1])));
+            merged = merged ? merged.extend(b) : b;
+          } else {
+            fail++;
+            if (res && res.reason) failReasons.push(res.reason);
           }
         }
 
       } catch (e) {
         fail++;
+        failReasons.push(e && e.message ? e.message : String(e));
+        console.warn('Street error:', r, e);
       }
 
       await sleep(200);
     }
 
-    if (!drawn) { setStatus('Nie udało się narysować żadnego zakresu/ulicy.', true); return; }
+    if (!drawn) {
+      const details = failReasons.length ? ` ${failReasons.slice(0, 3).join(' | ')}` : '';
+      setStatus(`Nie udało się narysować żadnego zakresu/ulicy.${details}`, true);
+      return;
+    }
 
     map.setView(merged.getCenter(), FIXED_ZOOM, { animate: true });
     updateHighlightSvg();
